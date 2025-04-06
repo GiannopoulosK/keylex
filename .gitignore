@@ -1,0 +1,21 @@
+# Python bytecode files
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.env/
+
+# Poetry lock files
+poetry.lock
+
+# Test and coverage directories
+.coverage/
+.tox/
+.nox/
+*.coverage
+nosetests.xml
+coverage.xml
+
+# dotenv files
+.env

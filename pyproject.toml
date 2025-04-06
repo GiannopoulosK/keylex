@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "keylex"
+version = "0.1.0"
+description = "A modular library for keyword matching and extraction."
+authors = ["Konstantinos Giannopoulos <giannopoulosk.data@gmail.com>"]
+license = "Apache License 2.0"
+readme = "README.md"
+packages = [{ include = "keylex/*.py" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+scikit-learn = "1.6.1"
+numpy = "2.2.4"
+nltk = "3.9.1"
+RapidFuzz = "3.13.0"
+spacy = "3.8.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^6.2.5"
+ruff = "^0.11.4"
+mypy = "^0.910"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+# [tool.ruff]
+
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+
+[tool.mypy]
+files = "your_project, tests"
