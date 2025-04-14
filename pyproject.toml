@@ -1,35 +1,30 @@
-[tool.poetry]
+[project]
 name = "keylex"
-version = "0.1.0"
+version = "0.0.1"
 description = "A modular library for keyword matching and extraction."
-authors = ["Konstantinos Giannopoulos <giannopoulosk.data@gmail.com>"]
-license = "Apache License 2.0"
+authors = [
+    { name = "Konstantinos Giannopoulos", email = "giannopoulosk.data@gmail.com" },
+]
+license = { text = "Apache License 2.0" }
 readme = "README.md"
-packages = [{ include = "keylex/*.py" }]
+requires-python = ">=3.11,<3.13"
+dependencies = ["RapidFuzz==3.13.0"]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<3.13"
-scikit-learn = "1.6.1"
-numpy = "2.2.4"
-nltk = "3.9.1"
-RapidFuzz = "3.13.0"
-spacy = "3.8.5"
+[project.optional-dependencies]
+dev = ["pytest>=6.2.5,<7.0.0", "ruff>=0.11.4,<0.12.0", "mypy>=0.910,<0.920"]
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^6.2.5"
-ruff = "^0.11.4"
-mypy = "^0.910"
+[tool.setuptools.packages.find]
+include = ["keylex"]
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
 # [tool.ruff]
-
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"
 
 [tool.mypy]
-files = "your_project, tests"
+files = "keylex, tests"
