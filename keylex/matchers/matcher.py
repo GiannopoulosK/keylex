@@ -64,7 +64,7 @@ class Matcher(BaseMatcher):
             return matches
 
         elif output == OutputFormat.KEYWORDS.value:
-            return set([match["keyword"] for match in matches])
+            return list(set([match["keyword"] for match in matches]))
 
         elif output == OutputFormat.BOOLEAN.value:
             return {
