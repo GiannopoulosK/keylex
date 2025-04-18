@@ -13,3 +13,9 @@ poetry.lock
 coverage.xml
 
 .env
+
+.ruff_cache
+.pytest_cache
+
+dist/
+build/

@@ -1,6 +1,10 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "keylex"
-version = "0.0.1"
+version = "0.0.2"
 description = "A modular library for keyword matching and extraction."
 authors = [
     { name = "Konstantinos Giannopoulos", email = "giannopoulosk.data@gmail.com" },
@@ -13,18 +17,31 @@ dependencies = ["RapidFuzz==3.13.0"]
 [project.optional-dependencies]
 dev = ["pytest>=6.2.5,<7.0.0", "ruff>=0.11.4,<0.12.0", "mypy>=0.910,<0.920"]
 
-[tool.setuptools.packages.find]
-include = ["keylex"]
+[tool.hatch.envs.default]
+dependencies = [
+    "pytest>=6.2.5,<7.0.0",
+    "ruff>=0.11.4,<0.12.0",
+    "mypy>=0.910,<0.920",
+]
 
-[build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+[tool.hatch.build.targets.wheel]
+packages = ["keylex"]
 
-# [tool.ruff]
+[tool.hatch.build.targets.sdist]
+include = ["keylex/**", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.hatch.publish.repo]
+repo = "pypi"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.envs.default.scripts]
+test = "pytest -q"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"
 
 [tool.mypy]
-files = "keylex, tests"
+files = ["keylex", "tests"]
