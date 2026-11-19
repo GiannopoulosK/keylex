@@ -1,179 +1,202 @@
-from abc import ABC, abstractmethod
-from typing import List, Dict, Union
-import logging
-from .enums import OutputFormat
-from rapidfuzz import fuzz
-import re
-from .keyword_list import KeywordList
+"""The main :class:`KeywordMatcher`."""
 
-logger = logging.getLogger(__name__)
+from __future__ import annotations
+
+import dataclasses
+import warnings
+from collections.abc import Callable, Iterable, Mapping
+from typing import Any
+
+from ..keyword import _MUTATIONS, Keyword
+from ..keyword_list import KeywordList
+from ..match import Match
+from ..text import TokenNormalizer, normalize_text, resolve_stemmer, tokenize, word_tokens
+from ._compile import resolve_terms
+from ._postprocess import context_filter, dedupe, drop_fuzzy_shadowed, resolve_overlaps
+from .base import BaseMatcher
+from .enums import MatchType, Overlaps
+from .exact import ExactEngine
+from .fuzzy import FuzzyEngine, Scorer, resolve_scorer
+
+__all__ = ["BaseMatcher", "ExactMatcher", "FuzzyMatcher", "KeywordMatcher", "Matcher"]
+
+KeywordsInput = KeywordList | Iterable[Keyword | str | Mapping[str, Any]] | Mapping[str, Any] | str
 
 
-class BaseMatcher(ABC):
-    @abstractmethod
-    def match(self, text: str, output: str) -> List[Dict]:
-        pass
+def as_keyword_list(keywords: KeywordsInput) -> KeywordList:
+    """Coerce lists of strings / Keywords / dicts (or a dict) into a :class:`KeywordList`."""
+    if isinstance(keywords, KeywordList):
+        return keywords
+    if isinstance(keywords, (str, Keyword)):
+        return KeywordList([keywords])
+    if isinstance(keywords, Mapping):
+        return KeywordList.from_dict(keywords)
+    if isinstance(keywords, Iterable):
+        return KeywordList(keywords)
+    raise TypeError(f"keywords must be a KeywordList, a list or a dict, got {type(keywords).__name__}")
 
 
-class Matcher(BaseMatcher):
+class KeywordMatcher(BaseMatcher):
+    """Find keywords (and their synonyms, acronyms, variants and patterns) in text.
+
+    Example::
+
+        matcher = KeywordMatcher(["machine learning", Keyword("United States", acronyms="US")])
+        matcher.find("ML in the U.S.")                 # -> [Match(...)]
+        matcher.match(text, "count")                   # -> {"machine learning": 0, ...}
+
+    Args:
+        keywords: A :class:`KeywordList`, or anything it can be built from (list of strings,
+            Keywords or dicts; a dict). A ``KeywordList`` is used *live*: later changes to it or
+            its keywords are picked up automatically.
+        match_type: ``"exact"`` (default) or ``"fuzzy"`` (exact + typo-tolerant windowed matching).
+        threshold: Minimum fuzzy similarity (0-100).
+        fuzzy_algo: Deprecated alias of ``scorer``.
+        scorer: RapidFuzz scorer name (``"ratio"``, ``"partial_ratio"``, ``"token_sort_ratio"``,
+            ``"token_set_ratio"``, ``"WRatio"``, ``"QRatio"``) or a callable.
+        min_fuzzy_length: Terms shorter than this are never fuzzy-matched.
+        overlaps: ``"longest"`` (default), ``"leftmost"`` or ``"all"``.
+        case_sensitive: Default for terms that don't set it (acronyms are case-sensitive anyway).
+        ignore_accents: Treat ``"cafe"`` and ``"café"`` as equal.
+        stemmer: ``"light"`` (English plurals), any ``str -> str`` callable (e.g. a Porter stemmer),
+            or ``None``. Applied to both text and keywords so inflections match.
+        unicode_form: Unicode normalisation applied to text and terms before matching
+            (``"NFKC"`` default: decomposed accents, full-width letters and ligatures match their
+            plain forms; ``"NFC"``; or ``None`` to disable). Offsets always refer to the original text.
+        acronym_case: How acronym-like terms (``NASA``, ``G7``) are matched when they don't set
+            ``case_sensitive``: ``"strict"`` (default, exact spelling only), ``"title"`` (also
+            ``Nato``) or ``"ignore"`` (any case).
+        context_scope: Where ``exclude`` / ``require`` context words are looked for:
+            ``"sentence"`` (default, the window never crosses a sentence boundary) or ``"text"``.
     """
-    Abstract base class for keyword matchers.
 
-    Attributes:
-        keyword_list (KeywordList): A KeywordList instance.
-    """
-
-    def __init__(self, keyword_list: KeywordList):
-        if not isinstance(keyword_list, KeywordList):
-            logger.error("`keyword_list` must be an instance of KeywordList.")
-            raise ValueError("`keyword_list` must be an instance of KeywordList.")
-
-        self.keyword_list = keyword_list
-
-    @staticmethod
-    def _validate_text(text: str) -> None:
-        """Validates the input text."""
-        if not isinstance(text, str):
-            logger.error("`text` must be a string.")
-            raise ValueError("`text` must be a string.")
-
-    @staticmethod
-    def _validate_output_format(output: str) -> None:
-        """Validates the output format argument."""
-        try:
-            OutputFormat(output)
-        except ValueError:
-            valid_formats = ", ".join(OutputFormat.list())
-            logger.error(
-                f"Invalid output format: {output}. Supported formats: {valid_formats}"
-            )
-            raise ValueError(
-                f"Invalid output format: {output}. Supported formats: {valid_formats}"
-            )
-
-    def _find_matches(self, text: str) -> List[Dict]:
-        """Finds all matches for the keywords in the text."""
-        raise NotImplementedError("Subclasses must implement `_find_matches`.")
-
-    def format_output(
-        self, matches: List[Dict], output: str
-    ) -> Union[List[Dict], List[str], Dict[str, Union[bool, int]]]:
-        keywords = [keyword.keyword for keyword in self.keyword_list.keywords]
-
-        if output == OutputFormat.DETAILED.value:
-            return matches
-
-        elif output == OutputFormat.KEYWORDS.value:
-            return list(set([match["keyword"] for match in matches]))
-
-        elif output == OutputFormat.BOOLEAN.value:
-            return {
-                keyword: any(match["keyword"] == keyword for match in matches)
-                for keyword in keywords
-            }
-
-        elif output == OutputFormat.COUNT.value:
-            text_content = " ".join([match["keyword"] for match in matches]).lower()
-            return {
-                keyword: text_content.count(keyword.lower()) for keyword in keywords
-            }
-
-        else:
-            raise ValueError(
-                f"Unsupported output format: {output}. Supported formats: {', '.join([format_.value for format_ in OutputFormat])}"
-            )
-
-    def match(
-        self, text: str, output: str = "detailed"
-    ) -> Union[List[Dict], List[str], Dict[str, Union[bool, int]]]:
-        """Matches the keywords in the provided text."""
-        self._validate_text(text)
-        self._validate_output_format(output)
-        matches = self._find_matches(text)
-        return self.format_output(matches=matches, output=output)
-
-
-class KeywordMatcher(Matcher):
     def __init__(
         self,
-        keyword_list: KeywordList,
-        match_type: str = "exact",
-        threshold: int = 80,
-        fuzzy_algo: str = "partial_ratio",
-    ):
-        """
-        Initializes the keyword matcher.
+        keywords: KeywordsInput,
+        match_type: str | MatchType = "exact",
+        threshold: float = 85,
+        fuzzy_algo: str | None = None,
+        *,
+        scorer: str | Scorer = "ratio",
+        min_fuzzy_length: int = 4,
+        overlaps: str | Overlaps = "longest",
+        case_sensitive: bool = False,
+        ignore_accents: bool = False,
+        stemmer: str | Callable[[str], str] | None = None,
+        unicode_form: str | None = "NFKC",
+        acronym_case: str = "strict",
+        context_scope: str = "sentence",
+    ) -> None:
+        self.keyword_list = as_keyword_list(keywords)
+        self.match_type = MatchType.coerce(match_type, "match_type")
+        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 100:
+            raise ValueError(f"threshold must be a number between 0 and 100, got {threshold!r}")
+        self.threshold = float(threshold)
+        if fuzzy_algo is not None:
+            warnings.warn("`fuzzy_algo` is deprecated; use `scorer=`", DeprecationWarning, stacklevel=2)
+            scorer = fuzzy_algo
+        self._scorer = resolve_scorer(scorer)
+        self.scorer = scorer
+        if not isinstance(min_fuzzy_length, int) or min_fuzzy_length < 1:
+            raise ValueError("min_fuzzy_length must be a positive integer")
+        self.min_fuzzy_length = min_fuzzy_length
+        self.overlaps = Overlaps.coerce(overlaps, "overlaps strategy")
+        self.case_sensitive = bool(case_sensitive)
+        self.ignore_accents = bool(ignore_accents)
+        self._stemmer = resolve_stemmer(stemmer)
+        self.stemmer = stemmer
+        if unicode_form not in (None, "NFC", "NFKC"):
+            raise ValueError(f"unicode_form must be 'NFKC', 'NFC' or None, got {unicode_form!r}")
+        self.unicode_form = unicode_form
+        if acronym_case not in ("strict", "title", "ignore"):
+            raise ValueError(f"acronym_case must be 'strict', 'title' or 'ignore', got {acronym_case!r}")
+        self.acronym_case = acronym_case
+        if context_scope not in ("sentence", "text"):
+            raise ValueError(f"context_scope must be 'sentence' or 'text', got {context_scope!r}")
+        self.context_scope = context_scope
+        self._signature: object = None
+        self._mutations_seen = -1
+        self._compiled_list: KeywordList | None = None
+        self._exact: ExactEngine | None = None
+        self._fuzzy: FuzzyEngine | None = None
+        self._normalizer = TokenNormalizer(self.ignore_accents, self._stemmer)
 
-        Args:
-            keyword_list (List[Keyword]): List of Keyword objects.
-            match_type (str): Type of match ('exact' or 'fuzzy').
-            threshold (int): Minimum score for fuzzy matches. Default is 80.
-            fuzzy_algo (str): Fuzzy matching algorithm ('partial_ratio', 'token_sort_ratio', etc.).
-        """
-        super().__init__(keyword_list)
+    # legacy attribute
+    @property
+    def fuzzy_algo(self) -> str | Scorer:
+        return self.scorer
 
-        self.match_type = match_type
-        self.threshold = threshold
-        self.fuzzy_algo = fuzzy_algo
-
-        self.fuzzy_algorithms = {
-            "partial_ratio": fuzz.partial_ratio,
-            "token_sort_ratio": fuzz.token_sort_ratio,
-            "token_set_ratio": fuzz.token_set_ratio,
-            "ratio": fuzz.ratio,
-        }
-
-        if self.fuzzy_algo not in self.fuzzy_algorithms:
-            raise ValueError(
-                f"Invalid fuzzy algorithm: {self.fuzzy_algo}. Available algorithms: {', '.join(self.fuzzy_algorithms.keys())}"
-            )
-
-    def _find_matches(self, text: str) -> List[Dict]:
-        """Overrides the base method to find matches based on match type."""
-        if self.match_type == "exact":
-            return self._exact_match(text)
-        elif self.match_type == "fuzzy":
-            return self._fuzzy_match(text)
+    def compile(self, force: bool = False) -> KeywordMatcher:
+        """(Re)build the matching index. Called automatically when the keywords change."""
+        seen = _MUTATIONS[0]
+        if not force and self._exact is not None and self._compiled_list is self.keyword_list:
+            if seen == self._mutations_seen:  # nothing anywhere changed: O(1)
+                return self
+            sig = self.keyword_list.signature()
+            if sig == self._signature:  # something changed, but not our keywords
+                self._mutations_seen = seen
+                return self
         else:
-            raise ValueError("Invalid match_type. Choose either 'exact' or 'fuzzy'.")
+            sig = self.keyword_list.signature()
+        terms = resolve_terms(
+            self.keyword_list,
+            case_sensitive=self.case_sensitive,
+            min_fuzzy_length=self.min_fuzzy_length,
+            unicode_form=self.unicode_form,
+            acronym_case=self.acronym_case,
+        )
+        self._normalizer = TokenNormalizer(self.ignore_accents, self._stemmer)
+        self._exact = ExactEngine(terms, self._normalizer)
+        self._fuzzy = (
+            FuzzyEngine(terms, self._normalizer, self._scorer, self.threshold) if self.match_type == "fuzzy" else None
+        )
+        self._signature = sig
+        self._mutations_seen = seen
+        self._compiled_list = self.keyword_list
+        return self
 
-    def _exact_match(self, text: str) -> List[Dict]:
-        """Finds exact matches using regular expressions."""
-        matches = []
-        for keyword in self.keyword_list.keywords:
-            for term in [keyword.keyword] + keyword.related_terms:
-                pattern = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
-                for match in pattern.finditer(text):
-                    matches.append(
-                        {
-                            "keyword": keyword.keyword,  # Canonical keyword
-                            "start_pos": match.start(),
-                            "end_pos": match.end(),
-                            "method": "exact_match",
-                        }
-                    )
-        return matches
+    def find(self, text: str) -> list[Match]:
+        self._validate_text(text)
+        self.compile()
+        assert self._exact is not None
+        original = text
+        text, offsets = normalize_text(text, self.unicode_form)
+        matches = self._exact.find(text, tokenize(text))
+        words = None
+        if self._fuzzy is not None:
+            words = word_tokens(text)
+            matches = drop_fuzzy_shadowed(matches + self._fuzzy.find(text, words))
+        matches = dedupe(matches)
+        matches = context_filter(text, matches, self._normalizer, words, scope=self.context_scope)
+        if offsets is not None:
+            remapped = []
+            for m in matches:
+                start, end = offsets.span(m.start, m.end)
+                remapped.append(dataclasses.replace(m, start=start, end=end, text=original[start:end]))
+            matches = remapped
+        matches = resolve_overlaps(matches, self.overlaps)
+        return sorted(matches, key=Match.sort_key)
 
-    def _fuzzy_match(self, text: str) -> List[Dict]:
-        """Finds fuzzy matches based on the selected algorithm."""
-        matches = []
-        fuzzy_function = self.fuzzy_algorithms[self.fuzzy_algo]
-        text_lower = text.lower()
+    def __repr__(self) -> str:
+        return (
+            f"KeywordMatcher({len(self.keyword_list)} keywords, match_type={self.match_type!r}, "
+            f"overlaps={self.overlaps!r})"
+        )
 
-        for keyword in self.keyword_list.keywords:
-            for term in [keyword.keyword] + keyword.related_terms:
-                term_lower = term.lower()
-                score = fuzzy_function(text_lower, term_lower)
-                if score >= self.threshold:
-                    start_pos = text_lower.find(term_lower)
-                    if start_pos >= 0:
-                        matches.append(
-                            {
-                                "keyword": keyword.keyword,  # term
-                                "start_pos": start_pos,
-                                "end_pos": start_pos + len(term),
-                                "score": score,
-                                "method": "fuzzy_match",
-                            }
-                        )
-        return matches
+
+class ExactMatcher(KeywordMatcher):
+    """:class:`KeywordMatcher` with ``match_type="exact"``."""
+
+    def __init__(self, keywords: KeywordsInput, **kwargs: Any) -> None:
+        super().__init__(keywords, "exact", **kwargs)
+
+
+class FuzzyMatcher(KeywordMatcher):
+    """:class:`KeywordMatcher` with ``match_type="fuzzy"`` (exact + typo-tolerant)."""
+
+    def __init__(self, keywords: KeywordsInput, threshold: float = 85, **kwargs: Any) -> None:
+        super().__init__(keywords, "fuzzy", threshold, **kwargs)
+
+
+#: Backwards-compatible name of the old intermediate base class.
+Matcher = BaseMatcher

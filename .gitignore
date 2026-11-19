@@ -19,3 +19,13 @@ coverage.xml
 
 dist/
 build/
+
+# Local Claude Code workspace (not part of the project)
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+.venv/
+.mypy_cache/
+*.egg-info/
+htmlcov/

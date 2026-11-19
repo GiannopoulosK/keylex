@@ -4,44 +4,93 @@ build-backend = "hatchling.build"
 
 [project]
 name = "keylex"
-version = "0.0.2"
-description = "A modular library for keyword matching and extraction."
+dynamic = ["version"]
+description = "Keyword matching where keywords are objects: synonyms, acronyms, fuzzy matching, rules and keyword extraction."
 authors = [
     { name = "Konstantinos Giannopoulos", email = "giannopoulosk.data@gmail.com" },
 ]
-license = { text = "Apache License 2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
-dependencies = ["RapidFuzz==3.13.0"]
+requires-python = ">=3.10"
+dependencies = ["rapidfuzz>=3.0,<4"]
+keywords = ["keyword matching", "keyword extraction", "nlp", "fuzzy matching", "text classification", "rules", "spacy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing :: Linguistic",
+    "Typing :: Typed",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=6.2.5,<7.0.0", "ruff>=0.11.4,<0.12.0", "mypy>=0.910,<0.920"]
+spacy = ["spacy>=3.5,<4"]
+yaml = ["pyyaml>=6"]
+fast = ["numpy>=1.22"]  # batched, multi-threaded fuzzy scoring
+all = ["spacy>=3.5,<4", "pyyaml>=6", "numpy>=1.22"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "pyyaml>=6"]
 
-[tool.hatch.envs.default]
-dependencies = [
-    "pytest>=6.2.5,<7.0.0",
-    "ruff>=0.11.4,<0.12.0",
-    "mypy>=0.910,<0.920",
-]
+[project.scripts]
+keylex = "keylex.cli:main"
+
+[project.entry-points.spacy_factories]
+keylex = "keylex.integrations.spacy:make_keylex_component"
+
+[tool.hatch.version]
+path = "keylex/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["keylex"]
 
 [tool.hatch.build.targets.sdist]
-include = ["keylex/**", "README.md", "LICENSE", "pyproject.toml"]
+include = ["keylex/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
-[tool.hatch.publish.repo]
-repo = "pypi"
-
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.hatch.envs.default]
+features = ["dev"]
 
 [tool.hatch.envs.default.scripts]
-test = "pytest -q"
+test = "pytest {args}"
+cov = "pytest --cov=keylex --cov-report=term-missing {args}"
+lint = ["ruff check keylex tests examples", "ruff format --check keylex tests examples"]
+types = "mypy"
+
+[[tool.hatch.envs.hatch-test.matrix]]
+python = ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
 [tool.pytest.ini_options]
-minversion = "6.0"
-addopts = "-ra -q"
+minversion = "8.0"
+addopts = "-ra -q --doctest-modules --ignore=keylex/integrations/spacy.py"
+testpaths = ["tests", "keylex"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF", "PERF"]
+ignore = ["E501", "RUF001", "RUF022", "SIM105", "SIM108", "SIM905", "PERF203", "PERF401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011", "PERF"]
 
 [tool.mypy]
-files = ["keylex", "tests"]
+files = ["keylex"]
+python_version = "3.10"
+strict = true
+warn_unreachable = false
+
+[[tool.mypy.overrides]]
+module = ["spacy.*", "yaml"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["keylex"]
+omit = ["keylex/__main__.py"]
