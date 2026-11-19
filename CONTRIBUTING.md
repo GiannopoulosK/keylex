@@ -31,7 +31,7 @@ mypy                                     # strict
 * README code blocks are executed by `tests/test_readme.py`: a line such as
   `expr   # ['value']` asserts that `expr == ['value']`, so keep examples true.
 * Public functions and classes need type hints and a docstring.
-* Add an entry under "Unreleased" in [CHANGELOG.md](CHANGELOG.md) for user-visible changes.
+* Add an entry under "Unreleased" in [CHANGELOG.md](https://github.com/GiannopoulosK/keylex/blob/main/CHANGELOG.md) for user-visible changes.
 * Keep commits focused, with a short imperative subject ("Fix offsets after NFKC normalisation").
 
 ## Project layout

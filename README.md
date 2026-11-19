@@ -3,13 +3,15 @@
 [![CI](https://github.com/GiannopoulosK/keylex/actions/workflows/ci.yml/badge.svg)](https://github.com/GiannopoulosK/keylex/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/keylex.svg)](https://pypi.org/project/keylex/)
 [![Python](https://img.shields.io/pypi/pyversions/keylex.svg)](https://pypi.org/project/keylex/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/GiannopoulosK/keylex/blob/main/LICENSE)
 [![Typed](https://img.shields.io/badge/typing-mypy%20strict-informational.svg)](https://mypy.readthedocs.io/)
 
 **Keyword matching where keywords are objects.** A keyword in keylex knows its synonyms, acronyms,
 spelling variants, regex patterns, the context it must (or must not) appear in, its category and
 its weight. On top of that you get typo-tolerant fuzzy matching, a rule engine with a readable rule
 language, unsupervised keyword extraction, a spaCy component and a CLI.
+
+**Documentation:** <https://giannopoulosk.github.io/keylex/> (guide + API reference)
 
 ```bash
 pip install keylex            # core (only dependency: rapidfuzz)
@@ -35,7 +37,7 @@ Windows with Python 3.10-3.14.
 | Keyword extraction without a list (YAKE, RAKE, TextRank, TF-IDF) | ✅ | ❌ | ❌ | ❌ |
 | Works without an NLP pipeline | ✅ | ✅ | ✅ | ❌ |
 
-Exact matching speed on a 20,000-word text ([`benchmarks/bench_exact.py`](benchmarks/bench_exact.py),
+Exact matching speed on a 20,000-word text ([`benchmarks/bench_exact.py`](https://github.com/GiannopoulosK/keylex/blob/main/benchmarks/bench_exact.py),
 Python 3.13, one core):
 
 | keywords | keylex | regex alternation | FlashText |
@@ -516,8 +518,8 @@ python benchmarks/bench_exact.py
 ```
 
 Releases are published to PyPI by GitHub Actions when a `v*` tag is pushed (trusted publishing,
-see `.github/workflows/release.yml`). See [CONTRIBUTING.md](CONTRIBUTING.md) and the
-[changelog](CHANGELOG.md).
+see `.github/workflows/release.yml`). See [CONTRIBUTING.md](https://github.com/GiannopoulosK/keylex/blob/main/CONTRIBUTING.md) and the
+[changelog](https://github.com/GiannopoulosK/keylex/blob/main/CHANGELOG.md).
 
 ## License
 

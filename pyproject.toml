@@ -33,7 +33,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/GiannopoulosK/keylex"
-Documentation = "https://github.com/GiannopoulosK/keylex#readme"
+Documentation = "https://giannopoulosk.github.io/keylex/"
 Repository = "https://github.com/GiannopoulosK/keylex"
 Issues = "https://github.com/GiannopoulosK/keylex/issues"
 Changelog = "https://github.com/GiannopoulosK/keylex/blob/main/CHANGELOG.md"
@@ -43,7 +43,8 @@ spacy = ["spacy>=3.5,<4"]
 yaml = ["pyyaml>=6"]
 fast = ["numpy>=1.22"]  # batched, multi-threaded fuzzy scoring
 all = ["spacy>=3.5,<4", "pyyaml>=6", "numpy>=1.22"]
-dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "pyyaml>=6"]
+dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.10", "pyyaml>=6", "pre-commit>=3"]
+docs = ["mkdocs-material>=9.5", "mkdocstrings[python]>=0.26"]
 
 [project.scripts]
 keylex = "keylex.cli:main"

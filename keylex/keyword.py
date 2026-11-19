@@ -140,7 +140,10 @@ class Keyword:
 
     Args:
         keyword: The canonical name. Matches always report this name.
-        synonyms / acronyms / variants: Alternative surface forms. Accepts a string or a list.
+        synonyms: Alternative names (case-insensitive by default). A string or a list.
+        acronyms: Abbreviations such as ``"AI"`` (case-sensitive by default; ``"US"`` also matches
+            ``"U.S."``). A string or a list.
+        variants: Spellings and inflections (``"colour"``). A string or a list.
         patterns: Regular expressions that also count as this keyword.
         case_sensitive: Default case sensitivity for this keyword's terms (``None`` = inherit).
         fuzzy: Whether fuzzy matching is allowed for this keyword (``None`` = inherit).
