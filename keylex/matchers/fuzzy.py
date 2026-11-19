@@ -8,6 +8,7 @@ Identical windows are scored once, so repetitive text is cheap.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from typing import Any
 
@@ -40,8 +41,8 @@ def resolve_scorer(scorer: str | Scorer) -> Scorer:
 
 
 _np: Any
-try:  # numpy enables RapidFuzz's batched, multi-threaded cdist
-    import numpy as _np
+try:  # numpy enables RapidFuzz's batched, multi-threaded cdist (imported dynamically: it's optional)
+    _np = importlib.import_module("numpy")
 except ImportError:  # pragma: no cover - numpy is optional
     _np = None
 

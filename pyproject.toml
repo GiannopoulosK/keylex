@@ -31,6 +31,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.urls]
+Homepage = "https://github.com/GiannopoulosK/keylex"
+Documentation = "https://github.com/GiannopoulosK/keylex#readme"
+Repository = "https://github.com/GiannopoulosK/keylex"
+Issues = "https://github.com/GiannopoulosK/keylex/issues"
+Changelog = "https://github.com/GiannopoulosK/keylex/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 spacy = ["spacy>=3.5,<4"]
 yaml = ["pyyaml>=6"]
@@ -51,7 +58,7 @@ path = "keylex/_version.py"
 packages = ["keylex"]
 
 [tool.hatch.build.targets.sdist]
-include = ["keylex/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
+include = ["keylex/**", "tests/**", "examples/**", "README.md", "CHANGELOG.md", "LICENSE", "pyproject.toml"]
 
 [tool.hatch.envs.default]
 features = ["dev"]

@@ -150,7 +150,7 @@ def match_spans(
 
 
 def _overlaps(a: Span, b: Span) -> bool:
-    return a.start < b.end and b.start < a.end
+    return bool(a.start < b.end and b.start < a.end)
 
 
 class KeylexComponent:
@@ -268,7 +268,7 @@ class KeylexComponent:
         return self
 
 
-@Language.factory(
+@Language.factory(  # type: ignore[untyped-decorator,unused-ignore]  # untyped when spaCy is absent
     "keylex",
     default_config={
         "keywords": [],
