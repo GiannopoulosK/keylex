@@ -1,7 +1,10 @@
 {
   "keywords": [
     {"keyword": "Federal Reserve", "acronyms": ["Fed"], "category": "institution"},
-    {"keyword": "European Central Bank", "acronyms": ["ECB"], "category": "institution"}
+    {"keyword": "European Central Bank", "acronyms": ["ECB"], "category": "institution"},
+    {"keyword": "interest rate", "synonyms": ["borrowing costs"], "category": "monetary"},
+    {"keyword": "rate hike", "variants": ["rate increase"], "category": "monetary"},
+    {"keyword": "inflation", "synonyms": ["price growth", "CPI"], "category": "monetary"}
   ],
   "rules": {
     "monetary_policy": {
