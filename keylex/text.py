@@ -6,6 +6,7 @@ refer to the *original* text, so matches can be mapped back exactly.
 
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 from collections.abc import Callable
@@ -90,11 +91,20 @@ def fold_accents_with_offsets(text: str) -> tuple[str, OffsetMap | None]:
     starts: list[int] = []
     ends: list[int] = []
     for i, ch in enumerate(text):
-        folded = ch if ch.isascii() else fold_accents(ch)  # a lone combining mark folds to ""
+        folded = ch if ch.isascii() else _fold_char(ch)  # a lone combining mark folds to ""
         out.append(folded)
-        starts.extend([i] * len(folded))
-        ends.extend([i + 1] * len(folded))
+        if len(folded) == 1:
+            starts.append(i)
+            ends.append(i + 1)
+        elif folded:
+            starts.extend([i] * len(folded))
+            ends.extend([i + 1] * len(folded))
     return "".join(out), OffsetMap(starts, ends)
+
+
+@functools.lru_cache(maxsize=4096)
+def _fold_char(ch: str) -> str:
+    return fold_accents(ch)
 
 
 #: Words that end in "s" but are not plurals (or whose plural is irregular for the rules below).
@@ -196,32 +206,63 @@ class OffsetMap:
         return self._starts[start], self._ends[end - 1]
 
 
-#: Invisible characters removed before matching: soft hyphen, zero-width space/(non-)joiner, word
-#: joiner, BOM and variation selectors, so that an emoji with or without U+FE0F and words with soft
-#: hyphens or zero-width spaces inside them match.
-_IGNORABLE = "\u00ad\u200b\u200c\u200d\u2060\ufeff" + "".join(map(chr, range(0xFE00, 0xFE10)))
-#: Typographic apostrophes folded to "'" so that "Don\u2019t" matches "don't".
-_APOSTROPHES = "\u2018\u2019\u02bc"
-_PREP_TABLE = str.maketrans({**dict.fromkeys(_IGNORABLE), **dict.fromkeys(_APOSTROPHES, "'")})
-_NEEDS_PREP_RE = re.compile(f"[{_IGNORABLE}{_APOSTROPHES}]")
+#: Invisible word-internal characters removed before matching: soft hyphen, zero-width
+#: (non-)joiner, word joiner, BOM and variation selectors, so that an emoji with or without U+FE0F
+#: and words with soft hyphens inside them match.
+_IGNORABLE = "\u00ad\u200c\u200d\u2060\ufeff" + "".join(map(chr, range(0xFE00, 0xFE10)))
+#: Typographic apostrophes are folded to "'" (so "Don\u2019t" matches "don't"), and the zero-width
+#: space, a word *boundary*, becomes a real space. Both keep the text length.
+_SAME_LENGTH = {"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u200b": " "}
+_PREP_TABLE = str.maketrans({**dict.fromkeys(_IGNORABLE), **_SAME_LENGTH})
+_NEEDS_PREP_RE = re.compile(f"[{_IGNORABLE}{''.join(_SAME_LENGTH)}]")
 _IGNORABLE_RE = re.compile(f"[{_IGNORABLE}]")
+#: Characters with combining class 0 that still compose with the preceding character (Hangul
+#: vowel/trailing jamo, some Indic, Tibetan and Myanmar vowel signs). Computed from the Unicode
+#: canonical decompositions; only these need the (slow) composition check.
+_COMPOSING_STARTERS = frozenset(
+    map(
+        chr,
+        [
+            *range(0x1161, 0x1176),
+            *range(0x11A8, 0x11C3),
+            *(0x9BE, 0x9D7, 0xB3E, 0xB56, 0xB57, 0xBBE, 0xBD7, 0xCC2, 0xCD5, 0xCD6, 0xD3E, 0xD57),
+            *(0xDCF, 0xDDF, 0xFB5, 0xFB7, 0x102E, 0x1B35, 0x11127, 0x1133E, 0x11357, 0x114B0),
+            *(0x114BA, 0x114BD, 0x115AF, 0x11930),
+        ],
+    )
+)
 
 
 def _composes(text: str, i: int, j: int, form: str) -> bool:
     """Does ``text[j]`` (a non-combining character) merge with the cluster ``text[i:j]`` under
     ``form``? True for Hangul conjoining jamo and some Indic vowel signs."""
     ch = text[j]
-    if ch.isascii():
+    if ch not in _COMPOSING_STARTERS:
         return False
     norm = unicodedata.normalize
     return norm(form, text[i : j + 1]) != norm(form, text[i:j]) + norm(form, ch)  # type: ignore[arg-type]
 
 
+def _strip_ignorables(text: str) -> tuple[str, OffsetMap]:
+    """Delete :data:`_IGNORABLE` characters (and apply the same-length replacements) from an
+    already-normalised text, mapping offsets without a per-character Python loop."""
+    starts: list[int] = []
+    ends: list[int] = []
+    pos = 0
+    for m in _IGNORABLE_RE.finditer(text):
+        starts.extend(range(pos, m.start()))
+        ends.extend(range(pos + 1, m.start() + 1))
+        pos = m.end()
+    starts.extend(range(pos, len(text)))
+    ends.extend(range(pos + 1, len(text) + 1))
+    return text.translate(_PREP_TABLE), OffsetMap(starts, ends)
+
+
 def normalize_text(text: str, form: str | None = "NFKC") -> tuple[str, OffsetMap | None]:
     """Unicode-normalise ``text`` and return a map back to the original offsets.
 
-    Besides ``form`` normalisation, invisible format characters (soft hyphens, zero-width spaces,
-    variation selectors) are removed and typographic apostrophes become ``'``.
+    Besides ``form`` normalisation, invisible format characters (soft hyphens, joiners, variation
+    selectors) are removed, zero-width spaces become spaces and typographic apostrophes become ``'``.
 
     Returns ``(text, None)`` when nothing changes (the common case, checked cheaply). Characters
     are normalised in clusters (a character plus everything that combines with it), so every
@@ -233,7 +274,8 @@ def normalize_text(text: str, form: str | None = "NFKC") -> tuple[str, OffsetMap
         if not _NEEDS_PREP_RE.search(text):
             return text, None
         if not _IGNORABLE_RE.search(text):
-            return text.translate(_PREP_TABLE), None  # apostrophes only: same length, same offsets
+            return text.translate(_PREP_TABLE), None  # same-length replacements only: same offsets
+        return _strip_ignorables(text)
     out: list[str] = []
     starts: list[int] = []
     ends: list[int] = []

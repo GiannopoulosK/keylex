@@ -9,7 +9,9 @@ from ..match import Match
 from ..text import _TOKEN_RE, DASHES, Token, TokenNormalizer, fold_accents, fold_accents_with_offsets, tokenize
 from ._compile import CompiledTerm
 
-_END = ""  # tokens are never empty, so "" is a safe terminal key
+#: Trie terminal key. Tokens never contain whitespace, so no token key can equal it (a lone
+#: combining mark *can* normalise to "" under ignore_accents, so "" is not safe).
+_END = " "
 _DASH_CHARS = "".join(re.escape(d) for d in sorted(DASHES))
 _SEP_CLASS = "[\\s" + _DASH_CHARS + "]+"
 _OPT_SEP_CLASS = "[\\s" + _DASH_CHARS + "]*"

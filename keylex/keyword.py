@@ -8,7 +8,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .text import DASHES, looks_like_acronym
+from .text import DASHES, looks_like_acronym, normalize_text
 
 __all__ = ["TERM_KINDS", "Keyword", "Term", "TermKind"]
 
@@ -105,6 +105,8 @@ class Term:
             object.__setattr__(self, "text", _clean(self.text))
             if all(ch in DASHES or ch.isspace() for ch in self.text):
                 raise ValueError(f"term {self.text!r} only contains dashes, which are ignored when matching")
+            if not normalize_text(self.text)[0].strip():
+                raise ValueError(f"term {self.text!r} only contains invisible characters")
 
     @property
     def is_acronym_like(self) -> bool:

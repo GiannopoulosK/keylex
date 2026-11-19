@@ -214,7 +214,7 @@ def test_substring_terms_handle_dashes_and_accents() -> None:
     [
         ("I ❤\ufe0f NY", "❤\ufe0f NY"),  # emoji variation selector
         ("co\u00adoperation", "co\u00adoperation"),  # soft hyphen
-        ("co\u200boperation", "co\u200boperation"),  # zero-width space
+        ("co\u2060operation", "co\u2060operation"),  # word joiner
     ],
 )
 def test_invisible_characters_are_transparent(text: str, surface: str) -> None:
@@ -275,3 +275,48 @@ def test_bad_highlight_template_lists_the_fields() -> None:
     with pytest.raises(ValueError, match="available fields"):
         m.highlight("a bank", "<{foo}>")
     assert highlight("a bank", m.find("a bank"), "[{kind}:{text}]") == "a [keyword:bank]"
+
+
+# ---------------------------------------------------------------- second review round
+def test_zero_width_space_is_a_word_boundary() -> None:
+    m = KeywordMatcher(["learning", "machine learning", "NASA"])
+    assert [x.text for x in m.find("deep\u200blearning")] == ["learning"]
+    assert [x.text for x in m.find("machine\u200blearning")] == ["machine\u200blearning"]
+    assert [x.keyword for x in m.find("NASA\u200b\u200bSpaceX")] == ["NASA"]
+
+
+@pytest.mark.parametrize(
+    ("keyword", "text"),
+    [
+        ("ile", "il\u1eb9\u0300 wa"),  # Yoruba: a lone combining mark after a complete term
+        ("\u0643\u062a\u0628", "\u0643\u062a\u0628\u064e"),  # Arabic with a haraka
+        ("NASA", "NASA \u0301"),
+        ("cafe", "cafe\u0301"),
+    ],
+)
+@pytest.mark.parametrize("match_type", ["exact", "fuzzy"])
+@pytest.mark.parametrize("unicode_form", ["NFKC", None])
+def test_lone_combining_marks_do_not_crash(keyword: str, text: str, match_type: str, unicode_form: str | None) -> None:
+    matcher = KeywordMatcher([keyword], match_type, ignore_accents=True, unicode_form=unicode_form)
+    for m in matcher.find(text):
+        assert m.text == text[m.start : m.end]
+
+
+@pytest.mark.parametrize("term", ["\u200b", "\u00ad", "\ufe0f\u200d"])
+def test_invisible_only_terms_are_rejected(term: str) -> None:
+    with pytest.raises(ValueError, match="invisible"):
+        Keyword("x", synonyms=[term])
+
+
+def test_normalisation_fast_paths() -> None:
+    base = "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440. " * 100_000  # 1.3M chars of Cyrillic
+    soft = base + "co\u00adoperation"
+    t0 = time.perf_counter()
+    normalized, offsets = normalize_text(soft)
+    assert time.perf_counter() - t0 < 1.0
+    assert normalized.endswith("cooperation") and offsets is not None
+    assert offsets.span(len(normalized) - 11, len(normalized)) == (len(soft) - 12, len(soft))
+    nfd = base + unicodedata.normalize("NFD", "\u00e9")
+    t0 = time.perf_counter()
+    assert normalize_text(nfd)[0].endswith("\u00e9")
+    assert time.perf_counter() - t0 < 3.0
