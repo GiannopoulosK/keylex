@@ -102,3 +102,9 @@ ignore_missing_imports = true
 [tool.coverage.run]
 source = ["keylex"]
 omit = ["keylex/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 85  # 96% with all extras; spaCy may be missing on the newest Python
+show_missing = true
+skip_covered = true
+exclude_also = ["if TYPE_CHECKING:", "@overload", "raise NotImplementedError"]
