@@ -1,5 +1,11 @@
 # keylex
 
+[![CI](https://github.com/GiannopoulosK/keylex/actions/workflows/ci.yml/badge.svg)](https://github.com/GiannopoulosK/keylex/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/keylex.svg)](https://pypi.org/project/keylex/)
+[![Python](https://img.shields.io/pypi/pyversions/keylex.svg)](https://pypi.org/project/keylex/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Typed](https://img.shields.io/badge/typing-mypy%20strict-informational.svg)](https://mypy.readthedocs.io/)
+
 **Keyword matching where keywords are objects.** A keyword in keylex knows its synonyms, acronyms,
 spelling variants, regex patterns, the context it must (or must not) appear in, its category and
 its weight. On top of that you get typo-tolerant fuzzy matching, a rule engine with a readable rule
@@ -9,9 +15,38 @@ language, unsupervised keyword extraction, a spaCy component and a CLI.
 pip install keylex            # core (only dependency: rapidfuzz)
 pip install "keylex[spacy]"   # + spaCy pipeline component
 pip install "keylex[yaml]"    # + YAML keyword / rule files
+pip install "keylex[fast]"    # + numpy: batched, multi-threaded fuzzy scoring
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+. Pure Python, fully typed (`mypy --strict`), tested on Linux, macOS and
+Windows with Python 3.10-3.14.
+
+### Why keylex?
+
+| | keylex | regex alternation | FlashText | spaCy `PhraseMatcher` |
+|---|:---:|:---:|:---:|:---:|
+| One pass over the text, any vocabulary size | ✅ | ❌ (slows down with size) | ✅ | ✅ |
+| Synonyms / acronyms / variants report one canonical keyword | ✅ | manual | ✅ | manual |
+| Case-sensitive acronyms (`US` ≠ "us") next to case-insensitive terms | ✅ | manual | ❌ | per matcher |
+| `U.S.` = `US`, `e-mail` = `email`, `New  York` = `New-York`, plurals | ✅ | manual | ❌ | ❌ |
+| Typo-tolerant (fuzzy) multi-word matching with exact offsets | ✅ | ❌ | ❌ | ❌ |
+| Context rules (`exclude=["pie"]` for *Apple*) | ✅ | ❌ | ❌ | ❌ |
+| Boolean / proximity rule language (`NEAR`, `SENTENCE`, `ATLEAST`) | ✅ | ❌ | ❌ | ❌ |
+| Keyword extraction without a list (YAKE, RAKE, TextRank, TF-IDF) | ✅ | ❌ | ❌ | ❌ |
+| Works without an NLP pipeline | ✅ | ✅ | ✅ | ❌ |
+
+Exact matching speed on a 20,000-word text ([`benchmarks/bench_exact.py`](benchmarks/bench_exact.py),
+Python 3.13, one core):
+
+| keywords | keylex | regex alternation | FlashText |
+|---:|---:|---:|---:|
+| 100 | 18 ms | 29 ms | 12 ms |
+| 1,000 | 19 ms | 283 ms | 12 ms |
+| 10,000 | 21 ms | 2.8 s | 12 ms |
+| 100,000 | 22 ms | 35 s | 12 ms |
+
+keylex stays flat as the vocabulary grows. FlashText is faster because it does much less: no
+Unicode normalisation, no per-term case rules, no dotted acronyms or dash handling.
 
 ---
 
@@ -187,7 +222,20 @@ matcher.highlight("The bank by the river.")       # 'The [bank] by the [river].'
 ```
 
 A matcher built from a `KeywordList` stays **live**: add a keyword or a synonym later and the next
-call sees it. There's no need to rebuild anything.
+call sees it. There's no need to rebuild anything. The same goes for options:
+
+```python
+from keylex import KeywordMatcher
+
+matcher = KeywordMatcher(["Apple"])
+before = matcher.match("apples", "keywords")
+matcher.configure(stemmer="light")            # or: matcher.stemmer = "light"
+after = matcher.match("apples", "keywords")
+before, after                                 # ([], ['Apple'])
+```
+
+Matchers are thread-safe (one shared matcher can serve many threads, even while its keywords
+change) and picklable, so they can be sent to `multiprocessing` / `concurrent.futures` workers.
 
 ### Context: `exclude` and `require`
 
@@ -434,9 +482,12 @@ kl.to_json()          # versioned JSON; KeywordList.from_json() restores it exac
   `exclude`, `require`, `tags` (separated by `|` or `;`, or a JSON array), `category`, `weight`,
   `case_sensitive`, `fuzzy` and `context_window`. `to_csv()` output round-trips without loss.
 * **YAML** – the same structures (needs `keylex[yaml]`)
-* **TXT** – one keyword per line; `keyword | synonym | synonym`; `#` starts a comment
+* **TXT** – one keyword per line; `keyword | synonym | synonym`; `#` at the start of a line or
+  after a space starts a comment (so `C#` is a keyword). `save()` refuses to write keywords with
+  more than synonyms to `.txt` rather than silently dropping data.
 
-Files may start with a UTF-8 BOM. `kl.find_conflicts()` lists surface forms shared by several
+Files are read as UTF-8, and UTF-8/16/32 byte-order marks are detected (PowerShell writes UTF-16).
+`save()` writes atomically: a failure never leaves a half-written file. `kl.find_conflicts()` lists surface forms shared by several
 keywords (for example `Bank` and `bank`, or a synonym used twice), which all match the same text:
 
 ```python
@@ -457,10 +508,16 @@ subclass `keylex.rules.Rule` and implement `evaluate(doc)` and `to_dsl()`.
 
 ```bash
 pip install -e ".[dev,all]"
-pytest                 # tests + doctests
+pre-commit install     # optional: ruff on every commit
+pytest                 # tests, doctests and every README example
 ruff check . && ruff format --check .
-mypy                   # strict
+mypy                   # strict, also checks the public API's types (tests/typecheck_api.py)
+python benchmarks/bench_exact.py
 ```
+
+Releases are published to PyPI by GitHub Actions when a `v*` tag is pushed (trusted publishing,
+see `.github/workflows/release.yml`). See [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[changelog](CHANGELOG.md).
 
 ## License
 
