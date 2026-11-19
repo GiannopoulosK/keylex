@@ -21,8 +21,10 @@ Grammar (keywords are case-insensitive)::
     KW(name)              explicit keyword reference
 
 NOT operands are rejected inside NEAR, BEFORE and ATLEAST. Strings use double or single quotes with
-JSON escapes (``\"``, ``\'``, ``\\``, ``\n``, ``\uXXXX``); bare words may contain apostrophes
-(``don't``, ``O'Brien``). Every malformed rule raises :class:`RuleSyntaxError`.
+JSON escapes (``\"``, ``\'``, ``\\``, ``\n``, ``\uXXXX``; a surrogate pair ``\ud83d\ude00`` is one
+character, a lone surrogate is an error); bare words may contain apostrophes (``don't``,
+``O'Brien``). Rules may be nested at most :data:`MAX_DEPTH` levels deep. Every malformed rule raises
+:class:`RuleSyntaxError`.
 
 Examples::
 
@@ -49,9 +51,14 @@ from .core import (
     SameParagraph,
     SameSentence,
     TagRule,
+    _collapse,
 )
 
-__all__ = ["RuleSyntaxError", "parse_rule"]
+__all__ = ["MAX_DEPTH", "RuleSyntaxError", "lint_rule", "parse_rule"]
+
+#: Deepest nesting (parentheses, ``NOT`` operators and functions) a rule string may have.
+MAX_DEPTH = 100
+_OPERATORS = {"AND", "OR", "NOT"}
 
 _WS_RE = re.compile(r"\s+")
 # A bare word may contain apostrophes (don't, rock'n'roll, O'Brien) but cannot start with one.
@@ -70,21 +77,29 @@ class RuleSyntaxError(ValueError):
         source: The rule string.
         pos: Character offset of the problem in ``source``.
         rule_name: Name of the rule being loaded, when known (prefixed to the message).
+        filename: The rules file the rule came from, when known (prefixed to the message).
     """
 
-    def __init__(self, message: str, source: str, pos: int, rule_name: str | None = None) -> None:
-        self.message, self.source, self.pos, self.rule_name = message, source, pos, rule_name
-        prefix = f"rule {rule_name!r}: " if rule_name else ""
+    def __init__(
+        self, message: str, source: str, pos: int, rule_name: str | None = None, filename: str | None = None
+    ) -> None:
+        self.message, self.source, self.pos = message, source, pos
+        self.rule_name, self.filename = rule_name, filename
+        prefix = (f"{filename}: " if filename else "") + (f"rule {rule_name!r}: " if rule_name else "")
         one_line = re.sub(r"[\r\n\t]", " ", source)
         pointer = f"\n  {one_line}\n  {' ' * pos}^"
         super().__init__(f"{prefix}{message} (at position {pos}){pointer}")
 
     def with_rule_name(self, name: str) -> RuleSyntaxError:
         """A copy of this error whose message names the rule it came from."""
-        return RuleSyntaxError(self.message, self.source, self.pos, name)
+        return RuleSyntaxError(self.message, self.source, self.pos, name, self.filename)
+
+    def with_filename(self, filename: str) -> RuleSyntaxError:
+        """A copy of this error whose message names the file it came from."""
+        return RuleSyntaxError(self.message, self.source, self.pos, self.rule_name, filename)
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (type(self), (self.message, self.source, self.pos, self.rule_name))
+        return (type(self), (self.message, self.source, self.pos, self.rule_name, self.filename))
 
 
 @dataclass(frozen=True)
@@ -114,16 +129,33 @@ def _read_string(source: str, start: int) -> tuple[str, int]:
                 i += 2
                 continue
             if esc == "u":
-                digits = source[i + 2 : i + 6]
-                if len(digits) == 4 and all(c in "0123456789abcdefABCDEF" for c in digits):
-                    out.append(chr(int(digits, 16)))
-                    i += 6
+                code = _hex4(source, i)
+                if 0xDC00 <= code <= 0xDFFF:
+                    raise RuleSyntaxError("Lone low surrogate in \\u escape", source, i)
+                if 0xD800 <= code <= 0xDBFF:  # a surrogate pair, combined as in JSON
+                    low = _hex4(source, i + 6) if source.startswith("\\u", i + 6) else -1
+                    if not 0xDC00 <= low <= 0xDFFF:
+                        raise RuleSyntaxError(
+                            "Lone high surrogate in \\u escape (a \\uDC00-\\uDFFF escape must follow)", source, i
+                        )
+                    out.append(chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)))
+                    i += 12
                     continue
-                raise RuleSyntaxError("Invalid \\u escape (expected 4 hex digits)", source, i)
+                out.append(chr(code))
+                i += 6
+                continue
             raise RuleSyntaxError(f"Invalid escape sequence \\{esc} in string", source, i)
         out.append(ch)
         i += 1
     raise RuleSyntaxError("Unterminated string", source, start)
+
+
+def _hex4(source: str, i: int) -> int:
+    """The value of the ``\\uXXXX`` escape starting at ``source[i]``."""
+    digits = source[i + 2 : i + 6]
+    if len(digits) == 4 and all(c in "0123456789abcdefABCDEF" for c in digits):
+        return int(digits, 16)
+    raise RuleSyntaxError("Invalid \\u escape (expected 4 hex digits)", source, i)
 
 
 def _lex(source: str) -> list[_Tok]:
@@ -157,6 +189,12 @@ class _Parser:
         self.source = source
         self.toks = _lex(source)
         self.i = 0
+        self.depth = 0
+
+    def nest(self) -> None:
+        self.depth += 1
+        if self.depth > MAX_DEPTH:
+            raise self.error(f"Rule is nested too deeply (more than {MAX_DEPTH} levels)")
 
     @property
     def cur(self) -> _Tok:
@@ -206,7 +244,10 @@ class _Parser:
     def parse_not(self) -> Rule:
         if self.is_kw("NOT") or self.is_op("!", "~"):
             self.advance()
-            return Not(self.parse_not())
+            self.nest()
+            rule = Not(self.parse_not())
+            self.depth -= 1
+            return rule
         return self.parse_atom()
 
     def parse_int(self) -> int:
@@ -230,10 +271,12 @@ class _Parser:
             self.expect_op(")")
             return args
 
-    def parse_name_arg(self) -> str:
+    def parse_name_arg(self, what: str) -> str:
         self.expect_op("(")
         tok = self.cur
         if tok.kind == "string":
+            if not tok.value.strip():
+                raise self.error(f"Empty {what} name")
             self.advance()
             name = tok.value
         else:
@@ -250,10 +293,14 @@ class _Parser:
         tok = self.cur
         if self.is_op("("):
             self.advance()
+            self.nest()
             rule = self.parse_or()
             self.expect_op(")")
+            self.depth -= 1
             return rule
         if tok.kind == "string":
+            if not tok.value.strip():
+                raise self.error("Empty keyword name")
             self.advance()
             return KeywordRule(tok.value)
         if tok.kind == "word":
@@ -261,7 +308,10 @@ class _Parser:
             nxt = self.toks[self.i + 1]
             if upper in _FUNCS and nxt.kind == "op" and nxt.value == "(":
                 self.advance()
-                return self.parse_func(upper, tok)
+                self.nest()
+                rule = self.parse_func(upper, tok)
+                self.depth -= 1
+                return rule
             if upper in ("AND", "OR", "NOT"):
                 raise self.error(f"Expected a keyword, found operator {tok.value!r}")
             words = []
@@ -275,7 +325,7 @@ class _Parser:
 
     def parse_func(self, name: str, tok: _Tok) -> Rule:
         if name in ("CATEGORY", "TAG", "KW"):
-            arg = self.parse_name_arg()
+            arg = self.parse_name_arg("keyword" if name == "KW" else name.lower())
             if name == "CATEGORY":
                 return CategoryRule(arg)
             return TagRule(arg) if name == "TAG" else KeywordRule(arg)
@@ -297,11 +347,11 @@ class _Parser:
                     n = args[0]
                 if len(ints) > (1 if args and isinstance(args[0], int) else 0) or not rules:
                     raise ValueError("ANY([n,] e1, e2, ...) takes an optional leading number and expressions")
-                return AnyOf(*rules, min_count=n)
+                return _collapse(AnyOf(*rules, min_count=n))
             if ints or not rules:
                 raise ValueError(f"{name}(...) takes expressions only")
             if name == "ALL":
-                return AllOf(*rules)
+                return _collapse(AllOf(*rules))
             if name == "NONE":
                 return Not(AnyOf(*rules))
             if name == "SENTENCE":
@@ -312,7 +362,53 @@ class _Parser:
 
 
 def parse_rule(source: str) -> Rule:
-    """Parse a rule string into a :class:`Rule`. ``str(rule.to_dsl())`` round-trips."""
+    """Parse a rule string into a :class:`Rule`; ``parse_rule(rule.to_dsl()) == rule``."""
     if not isinstance(source, str):
         raise TypeError("rule source must be a string")
-    return _Parser(source).parse()
+    parser = _Parser(source)
+    try:
+        return parser.parse()
+    except RecursionError:  # pragma: no cover - MAX_DEPTH normally stops this first
+        raise RuleSyntaxError("Rule is nested too deeply", source, parser.cur.pos) from None
+
+
+def _bare(tok: _Tok) -> bool:
+    return tok.kind == "word" and tok.value.upper() not in _OPERATORS
+
+
+def lint_rule(source: str) -> list[str]:
+    """Warnings about a rule string that parses but probably doesn't say what was meant.
+
+    Currently: a lower-case ``and`` / ``or`` between bare words (``rock and roll``) is the
+    operator, so that rule means ``rock AND roll``; quote the phrase (``"rock and roll"``) if
+    the phrase was meant, or write the operator in capitals to silence the warning.
+    """
+    try:
+        toks = _lex(source)
+    except RuleSyntaxError:
+        return []
+    found: list[str] = []
+    for i in range(1, len(toks) - 1):
+        tok = toks[i]
+        if tok.kind != "word" or tok.value not in ("and", "or"):
+            continue
+        if not (_bare(toks[i - 1]) and _bare(toks[i + 1])):
+            continue
+        nxt = toks[i + 2]
+        if toks[i + 1].value.upper() in _FUNCS and nxt.kind == "op" and nxt.value == "(":
+            continue  # "a and NEAR(...)": an operator by intent
+        start = i - 1
+        while start > 0 and _bare(toks[start - 1]):
+            start -= 1
+        end = i + 1
+        while _bare(toks[end + 1]) and not (toks[end + 2].kind == "op" and toks[end + 2].value == "("):
+            end += 1
+        phrase = " ".join(t.value for t in toks[start : end + 1])
+        left = " ".join(t.value for t in toks[start:i])
+        right = " ".join(t.value for t in toks[i + 1 : end + 1])
+        op = tok.value.upper()
+        found.append(
+            f"lower-case {tok.value!r} (position {tok.pos}) is the {op} operator, so {phrase!r} means "
+            f"{left} {op} {right}; quote the phrase if you meant it, or write {op}"
+        )
+    return found

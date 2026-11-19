@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import difflib
+import inspect
 import json
 import math
 import warnings
@@ -11,13 +13,33 @@ from pathlib import Path
 from typing import Any
 
 from ..keyword import Keyword
-from ..keyword_list import KeywordList
+from ..keyword_list import KeywordList, read_text_file, write_text_atomic
 from ..match import Match
 from ..matchers.matcher import KeywordMatcher, KeywordsInput, as_keyword_list
 from .core import AnyOf, CategoryRule, Document, Rule, RuleResult, TagRule, walk
-from .dsl import RuleSyntaxError, parse_rule
+from .dsl import RuleSyntaxError, lint_rule, parse_rule
 
 __all__ = ["EngineResult", "NamedRule", "RuleEngine"]
+
+#: Keys allowed at the top level of a rules file / :meth:`RuleEngine.from_dict` mapping.
+FILE_KEYS = ("version", "keywords", "rules", "options")
+#: Keys allowed in a rule given as a mapping.
+RULE_KEYS = ("rule", "weight", "description")
+
+
+def _unknown_keys(given: Iterable[Any], allowed: Iterable[str], where: str) -> None:
+    allowed = list(allowed)
+    unknown = [k for k in given if k not in allowed]
+    if unknown:
+        key = unknown[0]
+        close = difflib.get_close_matches(str(key), allowed, n=1)
+        hint = f" (did you mean {close[0]!r}?)" if close else ""
+        raise ValueError(f"{where}: unknown key {key!r}{hint}; allowed keys: {', '.join(allowed)}")
+
+
+def _matcher_option_names() -> list[str]:
+    params = inspect.signature(KeywordMatcher.__init__).parameters
+    return [n for n, p in params.items() if n not in ("self", "keywords") and p.kind != p.VAR_KEYWORD]
 
 
 def _check_weight(name: str, weight: Any) -> float:
@@ -43,6 +65,8 @@ class NamedRule:
     rule: Rule
     weight: float = 1.0
     description: str = ""
+    #: The rule string the rule was parsed from ("" when it was given as a :class:`Rule`).
+    source: str = field(default="", compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {"rule": self.rule.to_dsl()}
@@ -96,7 +120,14 @@ class EngineResult:
             "fired": self.fired,
             "score": self.score,
             "rules": {
-                n: {"matched": r.matched, "keywords": r.keywords, "matches": [m.to_dict() for m in r.matches]}
+                n: {
+                    "matched": r.matched,
+                    "count": r.occurrences,
+                    "weight": self.rules[n].weight,
+                    "description": self.rules[n].description,
+                    "keywords": r.keywords,
+                    "matches": [m.to_dict() for m in r.matches],
+                }
                 for n, r in self.results.items()
             },
         }
@@ -137,11 +168,15 @@ class RuleEngine:
         self.keyword_list = as_keyword_list(keywords) if keywords is not None else KeywordList()
         self._rules: dict[str, NamedRule] = {}
         matcher_options.setdefault("overlaps", "all")
+        _unknown_keys(matcher_options, _matcher_option_names(), "matcher options")
         self.matcher_options = matcher_options
         self._combined = KeywordList()
         self._combined_sig: object = None
         self._aliases: dict[str, str] = {}
-        self._matcher = KeywordMatcher(self._combined, **matcher_options)
+        try:
+            self._matcher = KeywordMatcher(self._combined, **matcher_options)
+        except TypeError as exc:
+            raise ValueError(f"invalid matcher options: {exc}") from None
         if rules is not None and not isinstance(rules, Mapping):
             raise ValueError(f"rules must be a mapping {{name: rule}}, got a {type(rules).__name__}")
         for name, spec in (rules or {}).items():
@@ -149,9 +184,11 @@ class RuleEngine:
                 if "rule" not in spec:
                     keys = ", ".join(map(repr, spec)) or "none"
                     raise ValueError(f"rule {name!r}: missing the 'rule' key (keys given: {keys})")
-                self.add_rule(
-                    name, spec["rule"], weight=spec.get("weight", 1.0), description=spec.get("description") or ""
-                )
+                _unknown_keys(spec, RULE_KEYS, f"rule {name!r}")
+                description = spec.get("description") or ""
+                if not isinstance(description, str):
+                    raise ValueError(f"rule {name!r}: description must be a string, got {description!r}")
+                self.add_rule(name, spec["rule"], weight=spec.get("weight", 1.0), description=description)
             else:
                 self.add_rule(name, spec)
 
@@ -170,8 +207,9 @@ class RuleEngine:
         except RuleSyntaxError as exc:
             raise exc.with_rule_name(name) from None
         if not isinstance(parsed, Rule):
-            raise TypeError(f"rule {name!r}: must be a Rule or a rule string, got {type(rule).__name__}")
-        self._rules[name] = NamedRule(name, parsed, _check_weight(name, weight), str(description))
+            raise TypeError(f"rule {name!r}: must be a Rule or a rule string, got {type(rule).__name__}: {rule!r}")
+        source = rule if isinstance(rule, str) else ""
+        self._rules[name] = NamedRule(name, parsed, _check_weight(name, weight), str(description), source)
         self._combined_sig = None
         return self
 
@@ -247,32 +285,52 @@ class RuleEngine:
 
     # ------------------------------------------------------------------ checks
     def validate(self) -> list[str]:
-        """Static checks of the rule set; returns human-readable problems (empty list = clean).
+        """Static checks of the rule set; returns human-readable messages (empty list = clean).
 
-        Reports rules naming keywords that are not in the keyword list (only when a keyword list
-        was given: without one, auto-creating keywords is the intended use), names that are a
-        term of several keywords, ``CATEGORY`` / ``TAG`` names that no keyword has, ``ANY(n, ...)``
-        with fewer than ``n`` operands and non-finite weights.
+        The messages of :meth:`diagnostics`, errors and warnings alike.
         """
-        problems: list[str] = []
+        return [message for _, message in self.diagnostics()]
+
+    def diagnostics(self) -> list[tuple[str, str]]:
+        """Static checks of the rule set as ``(level, message)`` pairs.
+
+        ``"error"`` (the rule set is broken): no rules at all, ``CATEGORY`` / ``TAG`` names that no
+        keyword has, ``ANY(n, ...)`` with fewer than ``n`` operands, non-finite weights.
+
+        ``"warning"`` (informational; ``keylex rules --check`` passes unless ``--strict``): rules
+        naming keywords that are not in the keyword list (only when a keyword list was given; they
+        are added automatically, which is the intended use without one), names that are a term of
+        several keywords, and a lower-case ``and`` / ``or`` between bare words (``rock and roll``
+        means ``rock AND roll``).
+        """
+        out: list[tuple[str, str]] = []
+        if not self._rules:
+            out.append(("error", "no rules defined"))
         kl = self.keyword_list
         categories = {_fold(k.category) for k in kl if k.category}
         tags = {_fold(t) for k in kl for t in k.tags}
         for name, nr in self._rules.items():
             if not math.isfinite(nr.weight):
-                problems.append(f"rule {name!r}: weight {nr.weight!r} is not a finite number")
+                out.append(("error", f"rule {name!r}: weight {nr.weight!r} is not a finite number"))
+            out.extend(("warning", f"rule {name!r}: {w}") for w in lint_rule(nr.source))
             names = nr.rule.keyword_names()
             aliases, ambiguous = self._resolve_terms(names)
             for kw_name in sorted(names):
                 if kw_name in ambiguous:
-                    problems.append(
-                        f"rule {name!r}: {kw_name!r} is a term of several keywords "
-                        f"({', '.join(ambiguous[kw_name])}); it is matched as a separate keyword"
+                    out.append(
+                        (
+                            "warning",
+                            f"rule {name!r}: {kw_name!r} is a term of several keywords "
+                            f"({', '.join(ambiguous[kw_name])}); it is matched as a separate keyword",
+                        )
                     )
                 elif len(kl) and kw_name not in aliases and kl.get(kw_name) is None:
-                    problems.append(
-                        f"rule {name!r}: keyword {kw_name!r} is not in the keyword list "
-                        "(it will be added as a plain keyword)"
+                    out.append(
+                        (
+                            "warning",
+                            f"rule {name!r}: keyword {kw_name!r} is not in the keyword list "
+                            "(it will be added as a plain keyword)",
+                        )
                     )
             seen: set[str] = set()
             for node in walk(nr.rule):
@@ -281,12 +339,14 @@ class RuleEngine:
                     continue
                 seen.add(key)
                 if isinstance(node, CategoryRule) and _fold(node.name) not in categories:
-                    problems.append(f"rule {name!r}: no keyword has category {node.name!r}, so {key} never matches")
+                    out.append(
+                        ("error", f"rule {name!r}: no keyword has category {node.name!r}, so {key} never matches")
+                    )
                 elif isinstance(node, TagRule) and _fold(node.name) not in tags:
-                    problems.append(f"rule {name!r}: no keyword has tag {node.name!r}, so {key} never matches")
+                    out.append(("error", f"rule {name!r}: no keyword has tag {node.name!r}, so {key} never matches"))
                 elif isinstance(node, AnyOf) and node.min_count > len(node.rules):
-                    problems.append(f"rule {name!r}: {node.label()} needs more operands than it has")
-        return problems
+                    out.append(("error", f"rule {name!r}: {node.label()} needs more operands than it has"))
+        return out
 
     # ------------------------------------------------------------------ persistence
     def to_dict(self) -> dict[str, Any]:
@@ -313,22 +373,40 @@ class RuleEngine:
             raise ValueError('the rules file is empty; expected {"rules": {name: rule, ...}}')
         if not isinstance(data, Mapping):
             raise ValueError(f'expected an object with a "rules" mapping at the top level, got a {type(data).__name__}')
+        _unknown_keys(data, FILE_KEYS, "top level")
         file_options = data.get("options") or {}
         if not isinstance(file_options, Mapping):
             raise ValueError(f'"options" must be an object, got a {type(file_options).__name__}')
+        _unknown_keys(file_options, _matcher_option_names(), '"options"')
         rules = data.get("rules") or {}
         if not isinstance(rules, Mapping):
             raise ValueError(f'"rules" must be an object {{name: rule}}, got a {type(rules).__name__}')
+        named: dict[str, Any] = {}
+        for name, spec in rules.items():
+            if isinstance(name, int) and not isinstance(name, bool):
+                name = str(name)  # YAML reads `1:` as a number
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"rule names must be strings, got {name!r} (in YAML, quote names like yes, no, on, off, null)"
+                )
+            if not isinstance(spec, (str, Mapping, Rule)):
+                raise ValueError(f"rule {name!r}: expected a rule string or an object, got {spec!r}")
+            if isinstance(spec, Mapping) and "rule" in spec and not isinstance(spec["rule"], (str, Rule)):
+                raise ValueError(f'rule {name!r}: "rule" must be a rule string, got {spec["rule"]!r}')
+            named[name] = spec
         keywords = data.get("keywords")
         kl = None
         if keywords is not None:
-            if isinstance(keywords, list):
-                kl = KeywordList(keywords)
-            elif isinstance(keywords, Mapping):
-                kl = KeywordList.from_dict(keywords)
-            else:
-                raise ValueError(f'"keywords" must be a list or an object, got a {type(keywords).__name__}')
-        return cls(kl, rules, **{**file_options, **matcher_options})
+            try:
+                if isinstance(keywords, list):
+                    kl = KeywordList(keywords)
+                elif isinstance(keywords, Mapping):
+                    kl = KeywordList.from_dict(keywords)
+                else:
+                    raise ValueError(f"must be a list or an object, got a {type(keywords).__name__}")
+            except (TypeError, ValueError, KeyError) as exc:
+                raise ValueError(f'"keywords": {exc}') from None
+        return cls(kl, named, **{**file_options, **matcher_options})
 
     @classmethod
     def load(cls, path: str | Path, **matcher_options: Any) -> RuleEngine:
@@ -341,7 +419,7 @@ class RuleEngine:
             ImportError: a YAML file but PyYAML is not installed.
         """
         path = Path(path)
-        content = path.read_text(encoding="utf-8-sig")
+        content = read_text_file(path)  # UTF-8; UTF-8/16/32 byte-order marks are honoured
         data: Any
         if path.suffix.lower() in (".yaml", ".yml"):
             try:
@@ -359,15 +437,18 @@ class RuleEngine:
                 data = json.loads(content) if content.strip() else None
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}: invalid JSON: {exc}") from None
+            except RecursionError:
+                raise ValueError(f"{path}: invalid JSON: nested too deeply") from None
         try:
             return cls.from_dict(data, **matcher_options)
-        except RuleSyntaxError:
-            raise
-        except ValueError as exc:
+        except RuleSyntaxError as exc:
+            raise exc.with_filename(str(path)) from None
+        except (ValueError, TypeError) as exc:
             raise ValueError(f"{path}: {exc}") from None
 
     def save(self, path: str | Path) -> None:
-        Path(path).write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        """Write :meth:`to_dict` as JSON; atomic, so a failure never truncates an existing file."""
+        write_text_atomic(path, json.dumps(self.to_dict(), indent=2, ensure_ascii=False))
 
     def __repr__(self) -> str:
         return f"RuleEngine({len(self._rules)} rules, {len(self.keyword_list)} keywords)"

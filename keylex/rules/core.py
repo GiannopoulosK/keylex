@@ -17,8 +17,13 @@ is what ``ATLEAST(n, X)`` compares against ``n``:
 * ``NEAR`` / ``BEFORE``: the number of disjoint qualifying pairs, paired greedily left to right
   (each match takes part in at most one pair);
 * ``a AND b``: the smallest count among the positive (non-``NOT``) operands;
-* ``a OR b``: the sum of the operands' counts; ``ANY(n, ...)``: the ``n``-th largest operand count
-  (how many times ``n`` different operands are satisfied);
+* ``a OR b``: the number of distinct matches (keyword + span) of the operands that count matches
+  (keywords, ``CATEGORY``, ``TAG`` and ORs of those), plus the counts of the other operands; one
+  match is one occurrence, so ``inflation OR CATEGORY(monetary)`` counts an "inflation" match once;
+* ``ANY(n, ...)``: only operands satisfied by *different* matches count towards ``n`` (each counted
+  operand needs a match, keyword + span, that no other counted operand uses; identical operands
+  count once), so ``ANY(2, ML, "machine learning")`` does not fire on one "ML". The count is the
+  ``n``-th largest count among those operands;
 * ``SENTENCE`` / ``PARAGRAPH``: the number of qualifying sentences / paragraphs;
 * ``NOT x`` and ``ATLEAST``: 1 / the inner count when the rule holds, else 0.
 
@@ -279,6 +284,8 @@ def _check_int(value: object, what: str, minimum: int) -> int:
 def _check_name(name: object, what: str) -> str:
     if not isinstance(name, str) or not name.strip():
         raise ValueError(f"{what} name must be a non-empty string, got {name!r}")
+    if any(0xD800 <= ord(ch) <= 0xDFFF for ch in name):
+        raise ValueError(f"{what} name contains a lone surrogate code point: {name!r}")
     return " ".join(name.split())
 
 
@@ -352,10 +359,62 @@ class Rule(ABC):
 
 def _r(x: Rule | str) -> Rule:
     if isinstance(x, Rule):
-        return x
+        return _collapse(x)
     if isinstance(x, str):
         return KeywordRule(x)
     raise TypeError(f"Expected a Rule or a keyword name, got {type(x).__name__}")
+
+
+def _collapse(rule: Rule) -> Rule:
+    """The operand of a single-operand OR / AND (which mean just that operand), else ``rule``.
+
+    Operands are collapsed on construction so that e.g. ``near("a", any_of(not_("b")))`` is
+    rejected like ``NEAR(a, NOT b)`` and every rule serialises to a string that parses back to it.
+    """
+    while isinstance(rule, (AnyOf, AllOf)) and len(rule.rules) == 1 and getattr(rule, "min_count", 1) == 1:
+        rule = rule.rules[0]
+    return rule
+
+
+def _evidence(result: RuleResult) -> frozenset[tuple[str, tuple[int, int]]]:
+    return frozenset((m.keyword, m.span) for m in result.matches)
+
+
+def _counts_matches(rule: Rule) -> bool:
+    """True for rules whose occurrence count is their number of distinct matches."""
+    if isinstance(rule, (KeywordRule, CategoryRule, TagRule)):
+        return True
+    return isinstance(rule, AnyOf) and rule.min_count == 1 and all(_counts_matches(c) for c in rule.rules)
+
+
+def _distinct_operands(results: Sequence[RuleResult]) -> list[RuleResult]:
+    """A largest set of matched operands that are satisfied by pairwise different matches.
+
+    Bipartite matching (operand -> one of its matches, keyword + span); operands without matches
+    (e.g. ``NOT x``) are distinct unless they are the same rule. Higher counts are tried first.
+    """
+    unique: dict[str, RuleResult] = {}
+    for res in results:
+        if res.matched:
+            unique.setdefault(res.rule._key(), res)
+    cands = sorted(unique.values(), key=lambda r: -r.occurrences)
+    # Operands without matches get a pseudo-match of their own (no real span is negative).
+    evidence = [sorted(_evidence(r), key=lambda e: (e[1], e[0])) or [(r.rule._key(), (-1, -1))] for r in cands]
+    owner: dict[tuple[str, tuple[int, int]], int] = {}
+
+    def assign(i: int, seen: set[tuple[str, tuple[int, int]]]) -> bool:
+        for e in evidence[i]:
+            if e in seen:
+                continue
+            seen.add(e)
+            if e not in owner or assign(owner[e], seen):
+                owner[e] = i
+                return True
+        return False
+
+    chosen = [i for i in range(len(cands)) if assign(i, set())]
+    assigned = set(owner.values())
+    return [cands[i] for i in chosen if i in assigned]
 
 
 def _positive(x: Rule | str, where: str) -> Rule:
@@ -420,8 +479,10 @@ class TagRule(Rule):
 class AnyOf(Rule):
     """At least ``min_count`` of the child rules match (default 1 = OR).
 
-    Occurrences: the sum of the children's counts for OR; for ``min_count > 1`` the
-    ``min_count``-th largest child count.
+    With ``min_count > 1`` only children satisfied by different matches count (see the module
+    docs). Occurrences: for OR the number of distinct matches of the match-counting children plus
+    the counts of the others; for ``min_count > 1`` the ``min_count``-th largest count among the
+    distinct children.
     """
 
     rules: tuple[Rule, ...]
@@ -445,16 +506,27 @@ class AnyOf(Rule):
     def evaluate(self, doc: Document) -> RuleResult:
         results = tuple(doc.evaluate(r) for r in self.rules)
         n = sum(1 for r in results if r.matched)
-        ok = n >= self.min_count
-        hits = _unique(m for r in results if r.matched for m in r.matches) if ok else ()
-        counts = sorted((r.occurrences for r in results if r.matched), reverse=True)
-        if not ok:
-            count = 0
-        elif self.min_count == 1:
-            count = sum(counts)
+        detail = ""
+        if self.min_count == 1:
+            ok = n >= 1
+            spans: set[tuple[str, tuple[int, int]]] = set()
+            others: dict[str, int] = {}
+            for rule, res in zip(self.rules, results, strict=True):
+                if not res.matched:
+                    continue
+                if _counts_matches(rule):
+                    spans |= _evidence(res)
+                else:
+                    others.setdefault(rule._key(), res.occurrences)
+            count = len(spans) + sum(others.values()) if ok else 0
         else:
-            count = counts[self.min_count - 1]
-        detail = f"{n}/{len(results)} matched, need {self.min_count}" if self.min_count > 1 else ""
+            distinct = _distinct_operands(results)
+            ok = len(distinct) >= self.min_count
+            counts = sorted((r.occurrences for r in distinct), reverse=True)
+            count = counts[self.min_count - 1] if ok else 0
+            extra = f" ({len(distinct)} with distinct matches)" if len(distinct) != n else ""
+            detail = f"{n}/{len(results)} matched{extra}, need {self.min_count}"
+        hits = _unique(m for r in results if r.matched for m in r.matches) if ok else ()
         return RuleResult(self, ok, hits, results, detail, count)
 
     def label(self) -> str:

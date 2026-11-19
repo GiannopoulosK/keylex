@@ -283,12 +283,18 @@ Keywords that a rule mentions but that aren't defined (like `inflation` above) a
 | `SENTENCE(bank, NOT river)` | `bank` in a sentence that has no `river` |
 | `CATEGORY(finance)`, `TAG(hot)` | any keyword of that category / tag |
 
-`AND` binds tighter than `OR`; use parentheses to group. Strings take JSON escapes (`'it's'`), and bare
-words may contain apostrophes (`don't`). A rule that names a synonym or acronym (`ML`) refers to the
-keyword that owns it. `CATEGORY` and `TAG` are case-insensitive. Syntax errors show the position of
-the problem and the name of the rule; `NOT` inside `NEAR`, `BEFORE` or `ATLEAST` is rejected because an
-absence has no position. `RuleEngine.validate()` reports unknown keywords, impossible `ANY(n, ...)` and
-categories or tags that no keyword has.
+`AND` binds tighter than `OR`; use parentheses to group. Strings take JSON escapes (`'it\'s'`), and bare
+words may contain apostrophes (`don't`); quote phrases that contain `and` / `or` / `not`
+(`"rock and roll"`; unquoted it means `rock AND roll`). A rule that names a synonym or acronym (`ML`)
+refers to the keyword that owns it. One match is one occurrence: `ATLEAST(2, inflation OR
+CATEGORY(monetary))` needs two different matches, and `ANY(n, ...)` only counts operands satisfied by
+different matches (`ANY(2, ML, "machine learning")` doesn't fire on one "ML"). `CATEGORY` and `TAG` are
+case-insensitive. Syntax errors show the position of the problem and the name of the rule; `NOT`
+inside `NEAR`, `BEFORE` or `ATLEAST` is rejected because an absence has no position.
+`RuleEngine.diagnostics()` reports errors (impossible `ANY(n, ...)`, categories or tags that no
+keyword has) and warnings (keywords that will be added automatically, lower-case `and` / `or` between
+bare words); `validate()` returns all of their messages. Rules files may only contain the keys
+`version`, `keywords`, `rules` and `options`, and a rule object only `rule`, `weight` and `description`.
 
 ### Python API
 
@@ -337,9 +343,13 @@ extract_keywords(article, method="textrank")              # graph-based
 
 All extractors are pure Python with built-in stopword lists: English by default, `language="de"`
 (`de`, `fr`, `es`, `it`, `el`), or your own `stopwords=[...]`. Near-duplicates (`neural network` /
-`neural networks`, `e-mail` / `email`) are merged, and `diversity=` (MMR, default 0.3) keeps
+`neural networks`, `e-mail` / `email`) are merged (their occurrences are counted together), and
+`diversity=` (MMR, default 0.3) keeps
 overlapping phrases such as "Apple iPhone" / "Apple iPhone sales" from crowding the list.
-`pos_filter=spacy.load("en_core_web_sm")` keeps only noun phrases. Every extracted phrase is a
+Without a tagger, verb heuristics keep verbs out of phrases while words that are also nouns stay
+usable ("mean squared error", "free fall"); `pos_filter=spacy.load("en_core_web_sm")` lets real
+part-of-speech tags decide instead and keeps only noun phrases. URLs, e-mail addresses, @handles and
+#hashtags are never part of a phrase. Every extracted phrase is a
 real surface form of the text (`AT&T`, `C++`, `Node.js` and all-caps acronyms such as `WHO` stay
 intact), so `get_extractor("yake").to_keyword_list(text)` gives a `KeywordList` that finds them again.
 
@@ -368,11 +378,14 @@ or a fixed label (`"fixed"`).
 
 * Keywords and options are saved with the pipeline (`nlp.to_disk()` / `spacy.load()`, `to_bytes()`).
 * `span._.keylex_matches` lists every keyword behind a span (two keywords can share one surface form);
-  `doc._.keylex_matches` is the full matcher output.
+  `doc._.keylex_matches` is the full matcher output (several keylex components add to it).
+* Processed docs stay serialisable (`doc.to_bytes()`, `DocBin(store_user_data=True)`,
+  `nlp.pipe(texts, n_process=2)`); the matches are stored as plain data and rebuilt on access.
 * `set_ents=True` keeps the entities already on the doc unless `overwrite_ents=True`.
 * Matches that don't fall on token boundaries are skipped (`alignment_mode="strict"`).
 * `to_entity_ruler_patterns` emits token patterns: `ORTH` for case-sensitive terms such as acronyms,
-  `LOWER` otherwise. Regex terms can't be expressed and are skipped with a warning.
+  `LOWER` otherwise; an acronym such as `US` also gets a pattern for spaCy's `U.S.` token. Regex terms
+  can't be expressed and are skipped with a warning.
 
 ---
 
@@ -386,15 +399,18 @@ keylex match -k kw.json --json article.txt             # JSON output
 keylex extract article.txt -m rake -n 15 --save kw.json
 keylex rules rules.json article.txt --explain
 keylex rules rules.json docs/*.md --fail-on secret --min-score 2   # CI gate
-keylex rules --check rules.json                        # validate a rules file
+keylex rules --check rules.json                        # validate a rules file (--strict: warnings fail too)
 keylex match -k kw.json --format jsonl *.txt           # one JSON record per file
 ```
 
 Exit codes: `0` when something matched / a rule fired / the check passed, `1` when nothing matched /
-no rule fired / the check found problems (or `--fail-on` / `--min-score` were not met), `2` on usage or
-input errors. Files are read as UTF-8 (a BOM is fine; `--encoding` for anything else, with a warning
-on undecodable bytes). Boolean options have `--no-...` forms that override a rules file's `options`.
-Run `keylex <command> --help` for all options.
+no rule fired / the check found errors (or `--fail-on` / `--min-score` were not met), `2` on usage or
+input errors. Files are read as UTF-8 (a UTF-8/16/32 BOM is honoured, so PowerShell's `>` output works;
+`--encoding` for anything else, with a warning on undecodable bytes). Glob patterns (`docs/*.md`) are
+expanded by keylex when the shell doesn't (Windows); a pattern that matches nothing is an error.
+`NO_COLOR` disables colours. Boolean options have `--no-...` forms that override a rules file's
+`options`. Run `keylex <command> --help` for all options (`keylex rules --help` includes a rule
+language summary).
 
 ---
 

@@ -14,14 +14,18 @@ Exit codes (all subcommands): ``0`` something matched / a rule fired / the check
 ``1`` nothing matched / no rule fired / a ``--min-score`` / ``--fail-on`` / ``--check`` failure,
 ``2`` usage, I/O or input errors.
 
-Input is read as UTF-8 by default (a byte-order mark is stripped), from files or stdin; use
-``--encoding`` for other encodings. Undecodable bytes are replaced and reported on stderr.
-An input file given twice is processed once (a note is printed on stderr).
+Input is read as UTF-8 by default (a UTF-8/16/32 byte-order mark is honoured, so files written by
+PowerShell's ``>`` work), from files or stdin; use ``--encoding`` for other encodings. Undecodable
+bytes are replaced and reported on stderr. File arguments may be glob patterns (``docs/*.md``),
+expanded by keylex itself when the shell doesn't (Windows). An input file given twice is processed
+once (a note is printed on stderr). ``NO_COLOR`` disables colours.
 """
 
 from __future__ import annotations
 
 import argparse
+import errno
+import glob
 import json
 import os
 import sys
@@ -32,15 +36,17 @@ from typing import Any
 from . import __version__
 from .extractors import EXTRACTORS, get_extractor
 from .highlight import highlight
-from .keyword_list import KeywordList
+from .keyword_list import KeywordList, decode_bytes
 from .matchers.enums import OutputFormat
 from .matchers.fuzzy import SCORERS
 from .matchers.matcher import KeywordMatcher
+from .rules.dsl import RuleSyntaxError
 from .rules.engine import RuleEngine
 from .stopwords import STOPWORDS_BY_LANGUAGE
 
 EXIT_OK, EXIT_NONE, EXIT_ERROR = 0, 1, 2
 DEFAULT_ENCODING = "utf-8-sig"
+_GLOB_CHARS = "*?["
 
 
 class CLIError(Exception):
@@ -52,21 +58,57 @@ def _warn(message: str) -> None:
 
 
 def _decode(data: bytes, encoding: str, name: str) -> str:
+    """Decode input bytes; with the default encoding, UTF-8/16/32 byte-order marks are honoured."""
     try:
+        if encoding == DEFAULT_ENCODING:
+            return decode_bytes(data, "utf-8")
         return data.decode(encoding)
     except UnicodeDecodeError as exc:
         _warn(
             f"warning: {name}: not valid {encoding} ({exc.reason} at byte {exc.start}); "
             "undecodable bytes were replaced (use --encoding)"
         )
+        if encoding == DEFAULT_ENCODING:
+            return decode_bytes(data, "utf-8", errors="replace")
         return data.decode(encoding, errors="replace")
+
+
+def _stdin_is_tty() -> bool:
+    """True when stdin is an interactive terminal (reading it would wait for typing)."""
+    try:
+        if not sys.stdin.isatty():
+            return False
+        if sys.platform == "win32":  # NUL is a character device too: ask for a console
+            import ctypes
+            import msvcrt
+
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            mode = ctypes.c_uint32()
+            return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+        return True
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def _read_stdin(encoding: str) -> str:
     buffer = getattr(sys.stdin, "buffer", None)
     if buffer is None:  # already text (e.g. replaced by a StringIO)
-        return sys.stdin.read().removeprefix("﻿")
+        return sys.stdin.read().removeprefix("\N{ZERO WIDTH NO-BREAK SPACE}")
     return _decode(buffer.read(), encoding, "<stdin>")
+
+
+def _expand(names: Sequence[str]) -> list[str]:
+    """Expand glob patterns the shell left alone (Windows); a pattern matching no file is an error."""
+    out: list[str] = []
+    for name in names:
+        if name != "-" and any(c in name for c in _GLOB_CHARS) and not os.path.exists(name):
+            hits = [h for h in sorted(glob.glob(name, recursive=True)) if os.path.isfile(h)]
+            if not hits:
+                raise CLIError(f"no files match {name}")
+            out.extend(hits)
+        else:
+            out.append(name)
+    return out
 
 
 def _inputs(files: Sequence[str], encoding: str = DEFAULT_ENCODING) -> list[tuple[str, str]]:
@@ -76,10 +118,12 @@ def _inputs(files: Sequence[str], encoding: str = DEFAULT_ENCODING) -> list[tupl
     except LookupError:
         raise CLIError(f"unknown encoding: {encoding}") from None
     if not files:
+        if _stdin_is_tty():
+            raise CLIError("no input files given and stdin is a terminal; pass files, pipe text in, or use '-'")
         return [("<stdin>", _read_stdin(encoding))]
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for name in files:
+    for name in _expand(files):
         key = name if name == "-" else os.path.normcase(os.path.abspath(name))
         if key in seen:
             _warn(f"note: {name} given more than once; processing it once")
@@ -98,11 +142,11 @@ def _inputs(files: Sequence[str], encoding: str = DEFAULT_ENCODING) -> list[tupl
 
 
 def _input_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("files", nargs="*", help="text files (default: stdin; '-' = stdin)")
+    p.add_argument("files", nargs="*", help="text files or glob patterns (default: stdin; '-' = stdin)")
     p.add_argument(
         "--encoding",
         default=DEFAULT_ENCODING,
-        help=f"encoding of the input files and stdin (default {DEFAULT_ENCODING})",
+        help=f"encoding of the input files and stdin (default {DEFAULT_ENCODING}; BOMs are honoured)",
     )
 
 
@@ -160,13 +204,31 @@ def _matcher_options(args: argparse.Namespace) -> dict[str, Any]:
     return given
 
 
+def _load_keyword_file(path: str) -> KeywordList:
+    try:
+        return KeywordList.load(path)
+    except UnicodeDecodeError as exc:
+        raise CLIError(f"{path}: not valid {exc.encoding} ({exc.reason} at byte {exc.start})") from None
+    except (ValueError, TypeError, KeyError) as exc:
+        message = str(exc)
+        raise CLIError(message if path in message else f"{path}: {message}") from None
+
+
+def _keyword_files(args: argparse.Namespace) -> list[str]:
+    return _expand(args.keywords or [])
+
+
 def _load_keywords(args: argparse.Namespace) -> KeywordList:
     kl = KeywordList()
-    for path in args.keywords or []:
-        kl.merge(KeywordList.load(path))
+    for path in _keyword_files(args):
+        kl.merge(_load_keyword_file(path))
     for word in args.word or []:
         kl.add(word)
     return kl
+
+
+def _use_color(args: argparse.Namespace) -> bool:
+    return not args.no_color and not os.environ.get("NO_COLOR") and sys.stdout.isatty()
 
 
 def cmd_match(args: argparse.Namespace) -> int:
@@ -186,7 +248,7 @@ def cmd_match(args: argparse.Namespace) -> int:
         found_any = found_any or bool(matches)
         result: Any
         if args.output == "highlight":
-            ansi = fmt == "text" and sys.stdout.isatty() and not args.no_color
+            ansi = fmt == "text" and _use_color(args)
             result = highlight(text, matches, "ansi" if ansi else "brackets")
         elif args.output in ("json", "matches") and fmt != "text":
             result = matcher.format_output(matches, "detailed")
@@ -201,7 +263,7 @@ def cmd_match(args: argparse.Namespace) -> int:
         if multi:
             print(f"== {name}")
         if args.output == "highlight":
-            print(result)
+            print(result, end="" if result.endswith("\n") else "\n")
         elif args.output == "matches":
             for m in matches:
                 line, col = text.count("\n", 0, m.start) + 1, m.start - (text.rfind("\n", 0, m.start) + 1) + 1
@@ -215,7 +277,8 @@ def cmd_match(args: argparse.Namespace) -> int:
                     continue
                 print(f"{k!s:<{width}}  {v}")
         elif isinstance(result, list):
-            print("\n".join(map(str, result)))
+            for item in result:  # detailed: one JSON object per line
+                print(json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else item)
         else:
             print(result)
     if fmt == "json":
@@ -234,6 +297,10 @@ def _positive_int(value: str) -> int:
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
+    if args.save:
+        parent = Path(args.save).parent
+        if not parent.is_dir():
+            raise CLIError(f"--save: directory does not exist: {parent}")
     kwargs: dict[str, Any] = {"top_n": args.top, "max_ngram": args.max_ngram}
     if args.language is not None:
         kwargs["language"] = args.language
@@ -270,15 +337,23 @@ def cmd_extract(args: argparse.Namespace) -> int:
 
 def cmd_rules(args: argparse.Namespace) -> int:
     engine = RuleEngine.load(args.rules, **_matcher_options(args))
-    for path in args.keywords or []:
-        engine.keyword_list.merge(KeywordList.load(path))
+    for path in _keyword_files(args):
+        engine.keyword_list.merge(_load_keyword_file(path))
     if args.check:
-        problems = engine.validate()
-        for problem in problems:
-            print(problem)
-        if not problems:
-            print(f"{args.rules}: ok ({len(engine.rules)} rules)")
-        return EXIT_NONE if problems else EXIT_OK
+        diagnostics = engine.diagnostics()
+        errors = [m for level, m in diagnostics if level == "error"]
+        notes = [m for level, m in diagnostics if level != "error"]
+        for message in errors:
+            print(f"error: {message}")
+        for message in notes:
+            print(f"warning: {message}")
+        failed = bool(errors) or (args.strict and bool(notes))
+        if not failed:
+            extra = f", {len(notes)} warning(s)" if notes else ""
+            print(f"{args.rules}: ok ({len(engine.rules)} rules{extra})")
+        return EXIT_NONE if failed else EXIT_OK
+    if not engine.rules:
+        raise CLIError(f"{args.rules}: no rules defined")
     unknown = [r for r in args.fail_on or [] if r not in engine.rules]
     if unknown:
         raise CLIError(f"--fail-on: no rule named {', '.join(map(repr, unknown))} in {args.rules}")
@@ -317,12 +392,34 @@ def cmd_rules(args: argparse.Namespace) -> int:
     return EXIT_NONE if failures else EXIT_OK
 
 
+_OUTPUT_HELP = (
+    "what to print: matches (line:col, text, keyword; default), detailed (one JSON object per match), "
+    "keywords, boolean, count, categories, score, highlight (the text with matches marked), "
+    "json (= --format json)"
+)
+
+_RULES_EPILOG = """\
+rule language (keywords case-insensitive):
+  bank, "interest rate", interest rate   the keyword occurs (bare words form one phrase)
+  a AND b, a & b     a OR b, a | b       NOT a, !a, ~a       ( ... ) to group
+  NEAR(a, b, 5)       within 5 words (default 5)     BEFORE(a, b, 5)  a then b
+  ATLEAST(3, a)       at least 3 occurrences          ANY(2, a, b, c)  at least 2 of them
+  ALL(a, b)  NONE(a, b)  SENTENCE(a, b)  PARAGRAPH(a, b)  SENTENCE(bank, NOT river)
+  CATEGORY(finance)  TAG(hot)  KW(name)
+  strings: "..." or '...' with JSON escapes ('it\\'s'); quote phrases containing and/or/not
+
+rules file: {"keywords": [...], "rules": {"name": "RULE" | {"rule": ..., "weight": n,
+"description": ...}}, "options": {matcher options}}
+
+exit codes: 0 = a rule fired / check passed, 1 = no rule fired / check failed, 2 = error"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="keylex",
         description="Keyword matching, rules and extraction.",
         epilog="Exit codes: 0 = matched / fired / ok, 1 = nothing matched / no rule fired / check failed, "
-        "2 = usage, I/O or input error.",
+        "2 = usage, I/O or input error. NO_COLOR disables colours.",
     )
     parser.add_argument("--version", action="version", version=f"keylex {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -337,10 +434,16 @@ def build_parser() -> argparse.ArgumentParser:
         "-k", "--keywords", action="append", metavar="FILE", help="keyword file (.json/.csv/.txt/.yaml); repeatable"
     )
     pm.add_argument("-w", "--word", action="append", metavar="WORD", help="a keyword given inline; repeatable")
-    pm.add_argument("-o", "--output", default="matches", choices=[*OutputFormat.list(), "highlight", "json"])
+    pm.add_argument(
+        "-o", "--output", default="matches", choices=[*OutputFormat.list(), "highlight", "json"], help=_OUTPUT_HELP
+    )
     _format_args(pm)
     pm.add_argument("--all", action="store_true", help="with --output count: also list zero counts")
-    pm.add_argument("--no-color", action="store_true")
+    pm.add_argument(
+        "--no-color",
+        action="store_true",
+        help="no ANSI colours with --output highlight (also when NO_COLOR is set or output is not a terminal)",
+    )
     _matcher_args(pm)
     pm.set_defaults(func=cmd_match)
 
@@ -364,6 +467,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="evaluate a rules file",
         description="Evaluate rules. Exit code 1 if no rule fired (or a --min-score / --fail-on / --check "
         "condition failed), 2 on errors.",
+        epilog=_RULES_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     pr.add_argument(
         "rules", help='rules file: {"keywords": [...], "rules": {"name": "RULE" | {"rule": ..., "weight": n}}}'
@@ -372,12 +477,40 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("-k", "--keywords", action="append", metavar="FILE", help="extra keyword file; repeatable")
     pr.add_argument("--explain", action="store_true", help="show why each rule did or didn't fire (also in JSON)")
     _format_args(pr)
-    pr.add_argument("--check", action="store_true", help="only validate the rules file; exit 1 if problems are found")
+    pr.add_argument(
+        "--check",
+        action="store_true",
+        help="only validate the rules file; exit 1 if errors are found (warnings, e.g. keywords that will be "
+        "added automatically, are printed but don't fail)",
+    )
+    pr.add_argument("--strict", action="store_true", help="with --check: warnings fail the check too")
     pr.add_argument("--min-score", type=float, default=None, metavar="X", help="exit 1 if any input scores below X")
     pr.add_argument("--fail-on", action="append", metavar="RULE", help="exit 1 if RULE fires on any input; repeatable")
     _matcher_args(pr)
     pr.set_defaults(func=cmd_rules)
     return parser
+
+
+def _broken_stdout(exc: BaseException) -> bool:
+    """A write to a closed pipe (``| head``); on Windows that surfaces as EINVAL on flush."""
+    if isinstance(exc, BrokenPipeError):
+        return True
+    return (
+        sys.platform == "win32"
+        and isinstance(exc, OSError)
+        and exc.errno == errno.EINVAL
+        and getattr(exc, "filename", None) is None
+    )
+
+
+def _silence_stdout() -> None:
+    """Point stdout at devnull so the interpreter's final flush doesn't fail again."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -389,9 +522,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        return int(args.func(args))
-    except (CLIError, ValueError, KeyError, TypeError, OSError, ImportError, LookupError) as exc:
-        print(f"keylex: error: {exc}", file=sys.stderr)
+        code = int(args.func(args))
+        sys.stdout.flush()
+        return code
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        if _broken_stdout(exc):
+            _silence_stdout()
+            return EXIT_OK
+        if isinstance(exc, (CLIError, RuleSyntaxError, ValueError, KeyError, TypeError, OSError, ImportError)):
+            message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+        elif isinstance(exc, LookupError):
+            message = str(exc)
+        else:  # an unexpected failure: still a clean message and exit code 2, never a traceback
+            message = f"{type(exc).__name__}: {exc}"
+        print(f"keylex: error: {message}", file=sys.stderr)
         return EXIT_ERROR
 
 
