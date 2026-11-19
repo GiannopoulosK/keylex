@@ -89,7 +89,7 @@ ignore = ["E501", "RUF001", "RUF022", "SIM105", "SIM108", "SIM905", "PERF203", "
 "tests/**" = ["B011", "PERF"]
 
 [tool.mypy]
-files = ["keylex"]
+files = ["keylex", "tests/typecheck_api.py"]
 python_version = "3.10"
 strict = true
 warn_unreachable = false

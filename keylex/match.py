@@ -14,7 +14,7 @@ __all__ = ["KIND_PRIORITY", "Match"]
 KIND_PRIORITY = {"keyword": 0, "synonym": 1, "acronym": 2, "variant": 3, "pattern": 4}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Match:
     """A single keyword occurrence in a text.
 

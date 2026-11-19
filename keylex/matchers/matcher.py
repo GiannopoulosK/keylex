@@ -11,7 +11,7 @@ from typing import Any
 from ..keyword import _MUTATIONS, Keyword
 from ..keyword_list import KeywordList
 from ..match import Match
-from ..text import TokenNormalizer, normalize_text, resolve_stemmer, tokenize, word_tokens
+from ..text import TokenNormalizer, normalize_text, resolve_stemmer, word_tokens
 from ._compile import resolve_terms
 from ._postprocess import context_filter, dedupe, drop_fuzzy_shadowed, resolve_overlaps
 from .base import BaseMatcher
@@ -267,7 +267,7 @@ class KeywordMatcher(BaseMatcher):
         state = self._compiled()
         original = text
         text, offsets = normalize_text(text, state.unicode_form)
-        matches = state.exact.find(text, tokenize(text))
+        matches = state.exact.find(text)
         words = None
         if state.fuzzy is not None:
             words = word_tokens(text)

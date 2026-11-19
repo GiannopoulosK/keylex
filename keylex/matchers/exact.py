@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from ..match import Match
-from ..text import DASHES, Token, TokenNormalizer, fold_accents, fold_accents_with_offsets, tokenize
+from ..text import _TOKEN_RE, DASHES, Token, TokenNormalizer, fold_accents, fold_accents_with_offsets, tokenize
 from ._compile import CompiledTerm
 
 _END = ""  # tokens are never empty, so "" is a safe terminal key
@@ -103,15 +103,30 @@ class ExactEngine:
                         hits.append((ct, (exact[0].capitalize(),)))
 
     def find(self, text: str, tokens: list[Token] | None = None) -> list[Match]:
+        # Hot path. The trie walk only needs the token strings (re.findall, no per-token objects);
+        # character offsets are computed once, and only if something matched.
         if tokens is None:
-            tokens = tokenize(text)
-        toks = [t for t in tokens if not t.is_dash]
+            words: list[str] = _TOKEN_RE.findall(text)
+            has_dash = not DASHES.isdisjoint(words)
+            if has_dash:
+                words = [w for w in words if w not in DASHES]
+        else:
+            words = [t.text for t in tokens if not t.is_dash]
+        spans: list[tuple[int, int]] | None = None
+
+        def get_spans() -> list[tuple[int, int]]:
+            if tokens is not None:
+                return [(t.start, t.end) for t in tokens if not t.is_dash]
+            if has_dash:
+                return [m.span() for m in _TOKEN_RE.finditer(text) if m.group() not in DASHES]
+            return [m.span() for m in _TOKEN_RE.finditer(text)]
+
         norm = self.normalizer
         stemmed = norm.stemmer is not None
-        keys = [norm(t.text) for t in toks]
+        keys = list(map(norm, words))
         matches: list[Match] = []
         trie = self.trie
-        n = len(toks)
+        n = len(words)
         if trie:
             for i in range(n):
                 node = trie.get(keys[i])
@@ -119,12 +134,14 @@ class ExactEngine:
                 while node is not None:
                     hits = node.get(_END)
                     if hits:
-                        start, end = toks[i].start, toks[j - 1].end
+                        if spans is None:
+                            spans = get_spans()
+                        start, end = spans[i][0], spans[j - 1][1]
                         surface: tuple[str, ...] | None = None
                         for ct, exact in hits:
                             if ct.case_sensitive:
                                 if surface is None:
-                                    surface = tuple(norm.exact(t.text) for t in toks[i:j])
+                                    surface = tuple(norm.exact(w) for w in words[i:j])
                                 if surface != exact and not (stemmed and all(map(_same_case, surface, exact))):
                                     continue
                             matches.append(self._make(ct, text, start, end, "exact"))
