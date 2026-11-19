@@ -76,8 +76,18 @@ def highlight(
                 keyword=esc(m.keyword),
                 term=esc(m.term),
                 category=esc(m.category or ""),
+                kind=m.kind,
+                method=m.method,
                 score=round(m.score),
             )
+
+        try:  # fail early, with a helpful message, on templates such as "{foo}" or "{0}"
+            fmt.format(text="", keyword="", term="", category="", kind="", method="", score=0)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise ValueError(
+                f"Invalid highlight template {fmt!r} ({exc!r}); available fields: "
+                "{text}, {keyword}, {term}, {category}, {kind}, {method}, {score}"
+            ) from None
 
     out: list[str] = []
     pos = 0

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import unicodedata
 from dataclasses import dataclass
 
 from ..keyword import Keyword, Term
 from ..keyword_list import KeywordList
+from ..text import normalize_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +58,8 @@ def resolve_terms(
             else:
                 fz = not term.is_acronym_like and len(term.text) >= min_fuzzy_length
             text = term.text
-            if unicode_form is not None and term.kind != "pattern" and not text.isascii():
-                text = unicodedata.normalize(unicode_form, text)  # type: ignore[arg-type]
+            if term.kind != "pattern":
+                # the same normalisation as the text (NFKC, invisible characters, apostrophes)
+                text = normalize_text(text, unicode_form)[0]
             out.append(CompiledTerm(kw, term, cs, fz, text, title_ok))
     return out

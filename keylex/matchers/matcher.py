@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import threading
 import warnings
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
@@ -21,6 +22,21 @@ from .fuzzy import FuzzyEngine, Scorer, resolve_scorer
 __all__ = ["BaseMatcher", "ExactMatcher", "FuzzyMatcher", "KeywordMatcher", "Matcher"]
 
 KeywordsInput = KeywordList | Iterable[Keyword | str | Mapping[str, Any]] | Mapping[str, Any] | str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _Compiled:
+    """Everything ``find`` needs, built together and swapped in atomically."""
+
+    keywords: KeywordList
+    signature: object
+    options: tuple[Any, ...]
+    unicode_form: str | None
+    overlaps: str
+    context_scope: str
+    normalizer: TokenNormalizer
+    exact: ExactEngine
+    fuzzy: FuzzyEngine | None
 
 
 def as_keyword_list(keywords: KeywordsInput) -> KeywordList:
@@ -70,6 +86,21 @@ class KeywordMatcher(BaseMatcher):
             ``"sentence"`` (default, the window never crosses a sentence boundary) or ``"text"``.
     """
 
+    #: Public options; changing one after construction recompiles the index on the next call.
+    _OPTIONS = (
+        "match_type",
+        "threshold",
+        "scorer",
+        "min_fuzzy_length",
+        "overlaps",
+        "case_sensitive",
+        "ignore_accents",
+        "stemmer",
+        "unicode_form",
+        "acronym_case",
+        "context_scope",
+    )
+
     def __init__(
         self,
         keywords: KeywordsInput,
@@ -88,38 +119,85 @@ class KeywordMatcher(BaseMatcher):
         context_scope: str = "sentence",
     ) -> None:
         self.keyword_list = as_keyword_list(keywords)
-        self.match_type = MatchType.coerce(match_type, "match_type")
-        if isinstance(threshold, bool) or not isinstance(threshold, (int, float)) or not 0 <= threshold <= 100:
-            raise ValueError(f"threshold must be a number between 0 and 100, got {threshold!r}")
-        self.threshold = float(threshold)
         if fuzzy_algo is not None:
             warnings.warn("`fuzzy_algo` is deprecated; use `scorer=`", DeprecationWarning, stacklevel=2)
             scorer = fuzzy_algo
-        self._scorer = resolve_scorer(scorer)
-        self.scorer = scorer
-        if not isinstance(min_fuzzy_length, int) or min_fuzzy_length < 1:
-            raise ValueError("min_fuzzy_length must be a positive integer")
+        self.match_type: str = match_type
+        self.threshold: float = threshold
+        self.scorer: str | Scorer = scorer
         self.min_fuzzy_length = min_fuzzy_length
-        self.overlaps = Overlaps.coerce(overlaps, "overlaps strategy")
-        self.case_sensitive = bool(case_sensitive)
-        self.ignore_accents = bool(ignore_accents)
-        self._stemmer = resolve_stemmer(stemmer)
+        self.overlaps: str = overlaps
+        self.case_sensitive = case_sensitive
+        self.ignore_accents = ignore_accents
         self.stemmer = stemmer
-        if unicode_form not in (None, "NFC", "NFKC"):
-            raise ValueError(f"unicode_form must be 'NFKC', 'NFC' or None, got {unicode_form!r}")
         self.unicode_form = unicode_form
-        if acronym_case not in ("strict", "title", "ignore"):
-            raise ValueError(f"acronym_case must be 'strict', 'title' or 'ignore', got {acronym_case!r}")
         self.acronym_case = acronym_case
-        if context_scope not in ("sentence", "text"):
-            raise ValueError(f"context_scope must be 'sentence' or 'text', got {context_scope!r}")
         self.context_scope = context_scope
-        self._signature: object = None
+        self._lock = threading.Lock()
+        self._state: _Compiled | None = None
         self._mutations_seen = -1
-        self._compiled_list: KeywordList | None = None
-        self._exact: ExactEngine | None = None
-        self._fuzzy: FuzzyEngine | None = None
-        self._normalizer = TokenNormalizer(self.ignore_accents, self._stemmer)
+        self._validate_options()
+
+    def _validate_options(self) -> tuple[Any, ...]:
+        """Check (and canonicalise) the public options; return them as a snapshot tuple."""
+        self.match_type = MatchType.coerce(self.match_type, "match_type")
+        t = self.threshold
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not 0 <= t <= 100:
+            raise ValueError(f"threshold must be a number between 0 and 100, got {t!r}")
+        self.threshold = float(t)
+        resolve_scorer(self.scorer)
+        m = self.min_fuzzy_length
+        if isinstance(m, bool) or not isinstance(m, int) or m < 1:
+            raise ValueError("min_fuzzy_length must be a positive integer")
+        self.overlaps = Overlaps.coerce(self.overlaps, "overlaps strategy")
+        self.case_sensitive = bool(self.case_sensitive)
+        self.ignore_accents = bool(self.ignore_accents)
+        resolve_stemmer(self.stemmer)
+        if self.unicode_form not in (None, "NFC", "NFKC"):
+            raise ValueError(f"unicode_form must be 'NFKC', 'NFC' or None, got {self.unicode_form!r}")
+        if self.acronym_case not in ("strict", "title", "ignore"):
+            raise ValueError(f"acronym_case must be 'strict', 'title' or 'ignore', got {self.acronym_case!r}")
+        if self.context_scope not in ("sentence", "text"):
+            raise ValueError(f"context_scope must be 'sentence' or 'text', got {self.context_scope!r}")
+        return self._current_options()
+
+    def _current_options(self) -> tuple[Any, ...]:
+        return tuple(getattr(self, name) for name in self._OPTIONS)
+
+    def configure(self, **options: Any) -> KeywordMatcher:
+        """Change options in place: ``matcher.configure(threshold=80, stemmer="light")``.
+
+        Assigning the attributes directly works too; either way the index is rebuilt on the next
+        call. Invalid values raise and leave the matcher unchanged.
+        """
+        unknown = set(options) - set(self._OPTIONS)
+        if unknown:
+            raise TypeError(f"Unknown option(s): {', '.join(sorted(unknown))}; available: {', '.join(self._OPTIONS)}")
+        old = self.options()
+        for name, value in options.items():
+            setattr(self, name, value)
+        try:
+            self._validate_options()
+        except (TypeError, ValueError):
+            for name, value in old.items():
+                setattr(self, name, value)
+            raise
+        return self
+
+    def options(self) -> dict[str, Any]:
+        """The current options (``KeywordMatcher(keywords, **matcher.options())`` makes a twin)."""
+        return {name: getattr(self, name) for name in self._OPTIONS}
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        del state["_lock"]  # locks can't be pickled; the index is rebuilt lazily after unpickling
+        state["_state"] = None
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+        self._mutations_seen = -1
 
     # legacy attribute
     @property
@@ -127,54 +205,84 @@ class KeywordMatcher(BaseMatcher):
         return self.scorer
 
     def compile(self, force: bool = False) -> KeywordMatcher:
-        """(Re)build the matching index. Called automatically when the keywords change."""
-        seen = _MUTATIONS[0]
-        if not force and self._exact is not None and self._compiled_list is self.keyword_list:
-            if seen == self._mutations_seen:  # nothing anywhere changed: O(1)
-                return self
-            sig = self.keyword_list.signature()
-            if sig == self._signature:  # something changed, but not our keywords
-                self._mutations_seen = seen
-                return self
-        else:
-            sig = self.keyword_list.signature()
-        terms = resolve_terms(
-            self.keyword_list,
-            case_sensitive=self.case_sensitive,
-            min_fuzzy_length=self.min_fuzzy_length,
-            unicode_form=self.unicode_form,
-            acronym_case=self.acronym_case,
-        )
-        self._normalizer = TokenNormalizer(self.ignore_accents, self._stemmer)
-        self._exact = ExactEngine(terms, self._normalizer)
-        self._fuzzy = (
-            FuzzyEngine(terms, self._normalizer, self._scorer, self.threshold) if self.match_type == "fuzzy" else None
-        )
-        self._signature = sig
-        self._mutations_seen = seen
-        self._compiled_list = self.keyword_list
+        """(Re)build the index. Called automatically when the keywords or the options change.
+
+        Thread-safe: concurrent ``find`` calls always see one complete, consistent index.
+        """
+        self._compiled(force)
         return self
+
+    def _compiled(self, force: bool = False) -> _Compiled:
+        state = self._state
+        seen = _MUTATIONS[0]
+        if (
+            not force
+            and state is not None
+            and seen == self._mutations_seen
+            and state.keywords is self.keyword_list
+            and state.options == self._current_options()
+        ):  # nothing anywhere changed: O(1)
+            return state
+        with self._lock:
+            options = self._validate_options()
+            sig = self.keyword_list.signature()
+            state = self._state
+            if (
+                not force
+                and state is not None
+                and state.keywords is self.keyword_list
+                and state.signature == sig
+                and state.options == options
+            ):  # something changed, but not our keywords or options
+                self._mutations_seen = seen
+                return state
+            terms = resolve_terms(
+                self.keyword_list,
+                case_sensitive=self.case_sensitive,
+                min_fuzzy_length=self.min_fuzzy_length,
+                unicode_form=self.unicode_form,
+                acronym_case=self.acronym_case,
+            )
+            normalizer = TokenNormalizer(self.ignore_accents, resolve_stemmer(self.stemmer))
+            fuzzy = None
+            if self.match_type == "fuzzy":
+                fuzzy = FuzzyEngine(terms, normalizer, resolve_scorer(self.scorer), self.threshold)
+            state = _Compiled(
+                keywords=self.keyword_list,
+                signature=sig,
+                options=options,
+                unicode_form=self.unicode_form,
+                overlaps=self.overlaps,
+                context_scope=self.context_scope,
+                normalizer=normalizer,
+                exact=ExactEngine(terms, normalizer),
+                fuzzy=fuzzy,
+            )
+            self._state = state  # one assignment: readers never see a half-built index
+            self._mutations_seen = seen
+            return state
 
     def find(self, text: str) -> list[Match]:
         self._validate_text(text)
-        self.compile()
-        assert self._exact is not None
+        state = self._compiled()
         original = text
-        text, offsets = normalize_text(text, self.unicode_form)
-        matches = self._exact.find(text, tokenize(text))
+        text, offsets = normalize_text(text, state.unicode_form)
+        matches = state.exact.find(text, tokenize(text))
         words = None
-        if self._fuzzy is not None:
+        if state.fuzzy is not None:
             words = word_tokens(text)
-            matches = drop_fuzzy_shadowed(matches + self._fuzzy.find(text, words))
+            matches = drop_fuzzy_shadowed(matches + state.fuzzy.find(text, words))
         matches = dedupe(matches)
-        matches = context_filter(text, matches, self._normalizer, words, scope=self.context_scope)
+        matches = context_filter(text, matches, state.normalizer, words, scope=state.context_scope)
         if offsets is not None:
             remapped = []
             for m in matches:
                 start, end = offsets.span(m.start, m.end)
                 remapped.append(dataclasses.replace(m, start=start, end=end, text=original[start:end]))
             matches = remapped
-        matches = resolve_overlaps(matches, self.overlaps)
+        elif text is not original:  # same offsets, but report the original surface text
+            matches = [dataclasses.replace(m, text=original[m.start : m.end]) for m in matches]
+        matches = resolve_overlaps(matches, state.overlaps)
         return sorted(matches, key=Match.sort_key)
 
     def __repr__(self) -> str:

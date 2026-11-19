@@ -46,12 +46,22 @@ def dedupe(matches: list[Match]) -> list[Match]:
 
 
 def drop_fuzzy_shadowed(matches: list[Match]) -> list[Match]:
-    """Remove fuzzy matches overlapping an exact match of the same keyword."""
-    exact_by_kw: dict[str, list[Match]] = {}
-    for m in matches:
-        if m.method != "fuzzy":
-            exact_by_kw.setdefault(m.keyword, []).append(m)
-    return [m for m in matches if m.method != "fuzzy" or not any(m.overlaps(e) for e in exact_by_kw.get(m.keyword, ()))]
+    """Remove fuzzy matches overlapping an exact match of the same keyword (O(n log n))."""
+    exact_by_kw: dict[str, tuple[list[int], list[int]]] = {}
+    for m in sorted((m for m in matches if m.method != "fuzzy"), key=lambda m: m.start):
+        starts, max_ends = exact_by_kw.setdefault(m.keyword, ([], []))
+        starts.append(m.start)
+        max_ends.append(max(m.end, max_ends[-1]) if max_ends else m.end)  # running max of ends
+
+    def shadowed(m: Match) -> bool:
+        spans = exact_by_kw.get(m.keyword)
+        if spans is None:
+            return False
+        starts, max_ends = spans
+        i = bisect_left(starts, m.end)  # exact matches starting before the fuzzy one ends
+        return i > 0 and max_ends[i - 1] > m.start
+
+    return [m for m in matches if m.method != "fuzzy" or not shadowed(m)]
 
 
 def _contains_seq(haystack: list[str], needle: list[str]) -> bool:

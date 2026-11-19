@@ -6,11 +6,39 @@ import re
 from typing import Any
 
 from ..match import Match
-from ..text import DASHES, Token, TokenNormalizer, tokenize
+from ..text import DASHES, Token, TokenNormalizer, fold_accents, fold_accents_with_offsets, tokenize
 from ._compile import CompiledTerm
 
 _END = ""  # tokens are never empty, so "" is a safe terminal key
-_SEP_CLASS = "[\\s" + "".join(re.escape(d) for d in sorted(DASHES)) + "]+"
+_DASH_CHARS = "".join(re.escape(d) for d in sorted(DASHES))
+_SEP_CLASS = "[\\s" + _DASH_CHARS + "]+"
+_OPT_SEP_CLASS = "[\\s" + _DASH_CHARS + "]*"
+_SPLIT_RE = re.compile(f"(\\s+|[{_DASH_CHARS}]+)")
+
+
+def substring_pattern(text: str) -> str:
+    """Regex for a ``whole_word=False`` term: whitespace matches any run of spaces/dashes and a
+    dash is optional, exactly like the token matcher (``"e-mail"`` = ``"e mail"`` = ``"email"``)."""
+    out = []
+    for i, part in enumerate(_SPLIT_RE.split(text)):
+        if i % 2 == 0:
+            out.append(re.escape(part))
+        else:
+            out.append(_SEP_CLASS if part.strip() == "" else _OPT_SEP_CLASS)
+    return "".join(out)
+
+
+def _same_case(token: str, ref: str) -> bool:
+    """Case-sensitive comparison that tolerates stemmed endings ("Apples" vs "Apple"): the part
+    the two spellings share must have exactly the same case."""
+    if token == ref:
+        return True
+    n = 0
+    for a, b in zip(token, ref, strict=False):
+        if a.casefold() != b.casefold():
+            break
+        n += 1
+    return n > 0 and token[:n] == ref[:n]
 
 
 def term_token_variants(text: str, acronym_like: bool) -> list[tuple[str, ...]]:
@@ -51,14 +79,18 @@ class ExactEngine:
         self.normalizer = normalizer
         self.trie: dict[str, Any] = {}
         self.regex_terms: list[tuple[CompiledTerm, re.Pattern[str]]] = []
+        #: whole_word=False terms; matched on accent-folded text when ignore_accents is on
+        self.substring_terms: list[tuple[CompiledTerm, re.Pattern[str]]] = []
         for ct in terms:
             if ct.term.kind == "pattern":
                 flags = 0 if ct.case_sensitive else re.IGNORECASE
                 self.regex_terms.append((ct, re.compile(ct.term.text, flags)))
             elif not ct.term.whole_word:
                 flags = 0 if ct.case_sensitive else re.IGNORECASE
-                pattern = _SEP_CLASS.join(re.escape(p) for p in (ct.text or ct.term.text).split())
-                self.regex_terms.append((ct, re.compile(pattern, flags)))
+                text = ct.text or ct.term.text
+                if normalizer.ignore_accents:
+                    text = fold_accents(text)
+                self.substring_terms.append((ct, re.compile(substring_pattern(text), flags)))
             else:
                 for raw in term_token_variants(ct.text or ct.term.text, ct.term.is_acronym_like):
                     node = self.trie
@@ -75,6 +107,7 @@ class ExactEngine:
             tokens = tokenize(text)
         toks = [t for t in tokens if not t.is_dash]
         norm = self.normalizer
+        stemmed = norm.stemmer is not None
         keys = [norm(t.text) for t in toks]
         matches: list[Match] = []
         trie = self.trie
@@ -92,7 +125,7 @@ class ExactEngine:
                             if ct.case_sensitive:
                                 if surface is None:
                                     surface = tuple(norm.exact(t.text) for t in toks[i:j])
-                                if surface != exact:
+                                if surface != exact and not (stemmed and all(map(_same_case, surface, exact))):
                                     continue
                             matches.append(self._make(ct, text, start, end, "exact"))
                     if j >= n:
@@ -100,10 +133,18 @@ class ExactEngine:
                     node = node.get(keys[j])
                     j += 1
         for ct, pattern in self.regex_terms:
-            method = "pattern" if ct.term.kind == "pattern" else "exact"
             for m in pattern.finditer(text):
                 if m.end() > m.start():
-                    matches.append(self._make(ct, text, m.start(), m.end(), method))
+                    matches.append(self._make(ct, text, m.start(), m.end(), "pattern"))
+        if self.substring_terms:
+            haystack, offsets = text, None
+            if norm.ignore_accents:
+                haystack, offsets = fold_accents_with_offsets(text)
+            for ct, pattern in self.substring_terms:
+                for m in pattern.finditer(haystack):
+                    if m.end() > m.start():
+                        start, end = m.span() if offsets is None else offsets.span(*m.span())
+                        matches.append(self._make(ct, text, start, end, "exact"))
         return matches
 
     @staticmethod

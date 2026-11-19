@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import csv
 import io
 import json
+import os
+import re
+import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, Literal, overload
@@ -18,6 +23,58 @@ _ON_DUPLICATE = ("merge", "skip", "replace", "error")
 FORMAT_VERSION = 1
 
 KeywordLike = Keyword | str | Mapping[str, Any]
+
+_FORMATS = (".json", ".csv", ".yaml", ".yml", ".txt")
+#: A ``#`` comment starts a line or follows whitespace (so ``C#`` is not a comment).
+_TEXT_COMMENT_RE = re.compile(r"(?:^|(?<=\s))#")
+_BOMS = (
+    (codecs.BOM_UTF32_LE, "utf-32"),  # before UTF-16 LE, whose BOM is a prefix of it
+    (codecs.BOM_UTF32_BE, "utf-32"),
+    (codecs.BOM_UTF8, "utf-8-sig"),
+    (codecs.BOM_UTF16_LE, "utf-16"),
+    (codecs.BOM_UTF16_BE, "utf-16"),
+)
+
+
+def decode_bytes(data: bytes, encoding: str = "utf-8", errors: str = "strict") -> str:
+    """Decode ``data``, honouring a UTF-8/16/32 byte-order mark if there is one."""
+    for bom, codec in _BOMS:
+        if data.startswith(bom):
+            return data.decode(codec, errors)
+    return data.decode(encoding, errors)
+
+
+def read_text_file(path: str | Path, encoding: str = "utf-8") -> str:
+    """Read a text file, detecting BOMs; decode errors name the file."""
+    path = Path(path)
+    try:
+        return decode_bytes(path.read_bytes(), encoding)
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{path}: not valid {exc.encoding} text ({exc.reason} at byte {exc.start})") from None
+
+
+def write_text_atomic(path: str | Path, content: str) -> None:
+    """Write UTF-8 text via a temporary file + rename, so a failure never truncates ``path``."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+        # mkstemp creates the file private (0600); keep the existing file's mode, else the usual 0644
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _yaml() -> Any:
+    try:
+        import yaml
+    except ImportError:  # pragma: no cover - optional dependency
+        raise ImportError("YAML support requires PyYAML: pip install 'keylex[yaml]'") from None
+    return yaml
 
 
 _CSV_LIST_COLS = ("synonyms", "acronyms", "variants", "patterns", "exclude", "require", "tags")
@@ -55,7 +112,9 @@ def _split_multi(value: str | None) -> list[Any]:
 def _join_multi(items: list[Any]) -> str:
     if not items:
         return ""
-    if all(isinstance(i, str) and "|" not in i and ";" not in i and not i.startswith("[") for i in items):
+    if all(
+        isinstance(i, str) and "|" not in i and ";" not in i and not i.startswith("[") and i == i.strip() for i in items
+    ):
         return "|".join(items)
     return json.dumps(items, ensure_ascii=False)
 
@@ -127,10 +186,19 @@ class KeywordList:
         * simple: ``{"AI": "machine intelligence"}`` / ``{"AI": None}``
         * versioned JSON document: ``{"version": 1, "keywords": [...]}``
         """
-        if "keywords" in data and isinstance(data["keywords"], list):
+        if "version" in data and isinstance(data.get("keywords"), list):
+            if set(data) - {"version", "keywords"}:
+                raise ValueError(f"Unknown key(s) in keyword document: {sorted(set(data) - {'version', 'keywords'})}")
+            if data["version"] != FORMAT_VERSION:
+                raise ValueError(f"Unsupported keyword document version {data['version']!r}")
             return cls(data["keywords"], **kwargs)
         out = cls(**kwargs)
         for name, spec in data.items():
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"Keyword names must be strings, got {name!r} ({type(name).__name__}); "
+                    "in YAML, quote names such as 'yes', 'null' or '1984'"
+                )
             if spec is None:
                 out.add(Keyword(name))
             elif isinstance(spec, str):
@@ -198,13 +266,14 @@ class KeywordList:
 
     @classmethod
     def from_text(cls, data: str, **kwargs: Any) -> KeywordList:
-        """One keyword per line; optional synonyms after ``|``; ``#`` starts a comment.
+        """One keyword per line; optional synonyms after ``|``.
 
-        Example line: ``artificial intelligence | machine intelligence | AI``
+        ``#`` starts a comment at the start of a line or after whitespace, so ``C#`` and ``F#`` are
+        keywords, not comments. Example line: ``artificial intelligence | machine intelligence | AI``
         """
         out = cls(**kwargs)
         for line in data.splitlines():
-            line = line.split("#", 1)[0].strip()
+            line = _TEXT_COMMENT_RE.split(line, 1)[0].strip()
             if not line:
                 continue
             name, *syns = [p.strip() for p in line.split("|")]
@@ -213,22 +282,32 @@ class KeywordList:
 
     @classmethod
     def load(cls, path: str | Path, **kwargs: Any) -> KeywordList:
-        """Load from ``.json``, ``.csv``, ``.yaml``/``.yml`` (needs PyYAML) or ``.txt``."""
+        """Load from ``.json``, ``.csv``, ``.yaml``/``.yml`` (needs PyYAML) or ``.txt``.
+
+        Files are read as UTF-8; UTF-8/16/32 byte-order marks are detected automatically.
+        """
         path = Path(path)
-        content = path.read_text(encoding="utf-8-sig")
         suffix = path.suffix.lower()
-        if suffix == ".json":
-            return cls.from_json(content, **kwargs)
-        if suffix == ".csv":
-            return cls.from_csv(content, **kwargs)
-        if suffix in (".yaml", ".yml"):
-            try:
-                import yaml
-            except ImportError:  # pragma: no cover - optional dependency
-                raise ImportError("Loading YAML requires PyYAML: pip install pyyaml") from None
-            parsed = yaml.safe_load(content)
-            return cls(parsed, **kwargs) if isinstance(parsed, list) else cls.from_dict(parsed, **kwargs)
-        return cls.from_text(content, **kwargs)
+        if suffix not in _FORMATS:
+            raise ValueError(f"Unsupported keyword file type {path.suffix!r}; use one of {', '.join(_FORMATS)}")
+        content = read_text_file(path)
+        try:
+            if suffix == ".json":
+                return cls.from_json(content, **kwargs)
+            if suffix == ".csv":
+                return cls.from_csv(content, **kwargs)
+            if suffix in (".yaml", ".yml"):
+                parsed = _yaml().safe_load(content)
+                if parsed is None:
+                    return cls(**kwargs)
+                if isinstance(parsed, list):
+                    return cls(parsed, **kwargs)
+                if isinstance(parsed, Mapping):
+                    return cls.from_dict(parsed, **kwargs)
+                raise ValueError("YAML must contain a mapping or a list")
+            return cls.from_text(content, **kwargs)
+        except (ValueError, TypeError) as exc:
+            raise type(exc)(f"{path}: {exc}") from exc
 
     # ------------------------------------------------------------------ serialisation
     def to_dict(self) -> dict[str, dict[str, Any]]:
@@ -268,11 +347,51 @@ class KeywordList:
             writer.writerow(row)
         return buf.getvalue()
 
+    def to_yaml(self) -> str:
+        """YAML document (a list of keyword dicts); needs PyYAML. Round-trips via :meth:`load`."""
+        return str(_yaml().safe_dump(self.to_list(), allow_unicode=True, sort_keys=False))
+
+    def to_text(self) -> str:
+        """The plain-text format: ``keyword | synonym | synonym``, one keyword per line.
+
+        The format only holds names and synonyms. Raises ``ValueError`` if a keyword has anything
+        else (acronyms, options, ...) that would be lost; use JSON, CSV or YAML for those.
+        """
+        lines = []
+        for kw in self:
+            lossy = kw.to_dict()
+            lossy.pop("keyword")
+            synonyms = lossy.pop("synonyms", [])
+            if lossy.get("acronyms") == []:
+                lossy.pop("acronyms")
+            if lossy or not all(isinstance(s, str) for s in synonyms):
+                raise ValueError(
+                    f"Keyword {kw.name!r} has data the .txt format can't hold ({', '.join(lossy) or 'term options'}); "
+                    "save as .json, .csv or .yaml instead"
+                )
+            for item in (kw.name, *synonyms):
+                if "|" in item or _TEXT_COMMENT_RE.search(item) or item.startswith("#"):
+                    raise ValueError(f"{item!r} can't be written to the .txt format ('|' or ' #'); use .json or .csv")
+            lines.append(" | ".join((kw.name, *synonyms)))
+        return "\n".join(lines) + ("\n" if lines else "")
+
     def save(self, path: str | Path) -> None:
-        """Save as ``.json`` (default) or ``.csv`` depending on the file extension."""
+        """Save as ``.json``, ``.csv``, ``.yaml``/``.yml`` or ``.txt`` depending on the file extension.
+
+        The file is written atomically: a failure never leaves a truncated file behind.
+        """
         path = Path(path)
-        content = self.to_csv() if path.suffix.lower() == ".csv" else self.to_json()
-        path.write_text(content, encoding="utf-8")
+        suffix = path.suffix.lower()
+        writers: dict[str, Callable[[], str]] = {
+            ".json": self.to_json,
+            ".csv": self.to_csv,
+            ".yaml": self.to_yaml,
+            ".yml": self.to_yaml,
+            ".txt": self.to_text,
+        }
+        if suffix not in writers:
+            raise ValueError(f"Unsupported keyword file type {path.suffix!r}; use one of {', '.join(_FORMATS)}")
+        write_text_atomic(path, writers[suffix]())
 
     # ------------------------------------------------------------------ mutation
     def _touch(self) -> None:
@@ -446,7 +565,8 @@ class KeywordList:
 
     def signature(self) -> tuple[int, int, tuple[int, ...]]:
         """Changes whenever the list or any keyword in it changes (used for cache invalidation)."""
-        return (id(self), self._version, tuple(kw._version for kw in self._items.values()))
+        # list() snapshots the dict in one step, so a concurrent add() can't break the iteration
+        return (id(self), self._version, tuple(kw._version for kw in list(self._items.values())))
 
     # ------------------------------------------------------------------ dunder
     def __iter__(self) -> Iterator[Keyword]:

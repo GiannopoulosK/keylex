@@ -17,6 +17,7 @@ __all__ = [
     "Token",
     "TokenNormalizer",
     "fold_accents",
+    "fold_accents_with_offsets",
     "OffsetMap",
     "light_stem",
     "looks_like_acronym",
@@ -79,6 +80,21 @@ def fold_accents(text: str) -> str:
         return text
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def fold_accents_with_offsets(text: str) -> tuple[str, OffsetMap | None]:
+    """:func:`fold_accents` plus a map from the folded string back to ``text`` offsets."""
+    if text.isascii():
+        return text, None
+    out: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    for i, ch in enumerate(text):
+        folded = ch if ch.isascii() else fold_accents(ch)  # a lone combining mark folds to ""
+        out.append(folded)
+        starts.extend([i] * len(folded))
+        ends.extend([i + 1] * len(folded))
+    return "".join(out), OffsetMap(starts, ends)
 
 
 #: Words that end in "s" but are not plurals (or whose plural is irregular for the rules below).
@@ -180,15 +196,44 @@ class OffsetMap:
         return self._starts[start], self._ends[end - 1]
 
 
+#: Invisible characters removed before matching: soft hyphen, zero-width space/(non-)joiner, word
+#: joiner, BOM and variation selectors, so that an emoji with or without U+FE0F and words with soft
+#: hyphens or zero-width spaces inside them match.
+_IGNORABLE = "\u00ad\u200b\u200c\u200d\u2060\ufeff" + "".join(map(chr, range(0xFE00, 0xFE10)))
+#: Typographic apostrophes folded to "'" so that "Don\u2019t" matches "don't".
+_APOSTROPHES = "\u2018\u2019\u02bc"
+_PREP_TABLE = str.maketrans({**dict.fromkeys(_IGNORABLE), **dict.fromkeys(_APOSTROPHES, "'")})
+_NEEDS_PREP_RE = re.compile(f"[{_IGNORABLE}{_APOSTROPHES}]")
+_IGNORABLE_RE = re.compile(f"[{_IGNORABLE}]")
+
+
+def _composes(text: str, i: int, j: int, form: str) -> bool:
+    """Does ``text[j]`` (a non-combining character) merge with the cluster ``text[i:j]`` under
+    ``form``? True for Hangul conjoining jamo and some Indic vowel signs."""
+    ch = text[j]
+    if ch.isascii():
+        return False
+    norm = unicodedata.normalize
+    return norm(form, text[i : j + 1]) != norm(form, text[i:j]) + norm(form, ch)  # type: ignore[arg-type]
+
+
 def normalize_text(text: str, form: str | None = "NFKC") -> tuple[str, OffsetMap | None]:
     """Unicode-normalise ``text`` and return a map back to the original offsets.
 
+    Besides ``form`` normalisation, invisible format characters (soft hyphens, zero-width spaces,
+    variation selectors) are removed and typographic apostrophes become ``'``.
+
     Returns ``(text, None)`` when nothing changes (the common case, checked cheaply). Characters
-    are normalised in clusters (a base character plus its combining marks), so every cluster maps
-    to exactly one span of the original text.
+    are normalised in clusters (a character plus everything that combines with it), so every
+    cluster maps to exactly one span of the original text.
     """
-    if form is None or text.isascii() or unicodedata.is_normalized(form, text):  # type: ignore[arg-type]
+    if form is None or text.isascii():
         return text, None
+    if unicodedata.is_normalized(form, text):  # type: ignore[arg-type]
+        if not _NEEDS_PREP_RE.search(text):
+            return text, None
+        if not _IGNORABLE_RE.search(text):
+            return text.translate(_PREP_TABLE), None  # apostrophes only: same length, same offsets
     out: list[str] = []
     starts: list[int] = []
     ends: list[int] = []
@@ -196,9 +241,9 @@ def normalize_text(text: str, form: str | None = "NFKC") -> tuple[str, OffsetMap
     i = 0
     while i < n:
         j = i + 1
-        while j < n and unicodedata.combining(text[j]):
+        while j < n and (unicodedata.combining(text[j]) or _composes(text, i, j, form)):
             j += 1
-        chunk = unicodedata.normalize(form, text[i:j])  # type: ignore[arg-type]
+        chunk = unicodedata.normalize(form, text[i:j]).translate(_PREP_TABLE)  # type: ignore[arg-type]
         out.append(chunk)
         starts.extend([i] * len(chunk))
         ends.extend([j] * len(chunk))

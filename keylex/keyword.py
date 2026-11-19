@@ -6,10 +6,9 @@ import re
 import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from functools import total_ordering
 from typing import Any, Literal
 
-from .text import looks_like_acronym
+from .text import DASHES, looks_like_acronym
 
 __all__ = ["TERM_KINDS", "Keyword", "Term", "TermKind"]
 
@@ -56,6 +55,21 @@ def _key(text: str) -> str:
     return text.casefold()
 
 
+#: Patterns are keyed apart from plain terms. Cleaned terms never contain a newline (whitespace is
+#: collapsed), so a synonym such as "re:foo" can't collide with the pattern "foo".
+_PATTERN_PREFIX = "\nre:"
+
+
+def _context_phrase(value: Any, what: str) -> str:
+    phrase = _clean(value, what)
+    if not _WORD_CHARS_RE.search(phrase):
+        raise ValueError(f"{what} {phrase!r} has no letters or digits, so it could never be found")
+    return phrase
+
+
+_WORD_CHARS_RE = re.compile(r"\w")
+
+
 @dataclass(frozen=True)
 class Term:
     """One surface form of a keyword.
@@ -89,6 +103,8 @@ class Term:
                 raise ValueError(f"Invalid regular expression {self.text!r}: {exc}") from None
         else:
             object.__setattr__(self, "text", _clean(self.text))
+            if all(ch in DASHES or ch.isspace() for ch in self.text):
+                raise ValueError(f"term {self.text!r} only contains dashes, which are ignored when matching")
 
     @property
     def is_acronym_like(self) -> bool:
@@ -109,7 +125,6 @@ class Term:
         return cls(**{k: data[k] for k in ("text", "kind", "case_sensitive", "fuzzy", "whole_word") if k in data})
 
 
-@total_ordering
 class Keyword:
     """A canonical keyword plus everything that should count as a mention of it.
 
@@ -212,7 +227,7 @@ class Keyword:
         return list(self._terms.values())
 
     def iter_terms(self, *kinds: str) -> Iterator[Term]:
-        for term in self._terms.values():
+        for term in list(self._terms.values()):  # snapshot: safe if terms are added meanwhile
             if not kinds or term.kind in kinds:
                 yield term
 
@@ -228,9 +243,7 @@ class Keyword:
             term = item if isinstance(item, Term) else Term(item, kind)
             if term.kind != kind:
                 term = Term(term.text, kind, term.case_sensitive, term.fuzzy, term.whole_word)
-            key = term.text if term.kind == "pattern" else _key(term.text)
-            if term.kind == "pattern":
-                key = "re:" + key
+            key = _PATTERN_PREFIX + term.text if term.kind == "pattern" else _key(term.text)
             if key not in self._terms:
                 self._terms[key] = term
                 changed = True
@@ -241,7 +254,7 @@ class Keyword:
         changed = False
         for item in _flatten(items):
             text = item.text if isinstance(item, Term) else item
-            key = ("re:" + text) if kind == "pattern" else _key(" ".join(text.split()))
+            key = (_PATTERN_PREFIX + text) if kind == "pattern" else _key(" ".join(text.split()))
             term = self._terms.get(key)
             if term is not None and term.kind == kind:
                 del self._terms[key]
@@ -407,7 +420,7 @@ class Keyword:
 
     @exclude.setter
     def exclude(self, value: str | Iterable[str] | None) -> None:
-        self._exclude = list(dict.fromkeys(_clean(v, "exclude phrase") for v in _flatten((value,))))
+        self._exclude = list(dict.fromkeys(_context_phrase(v, "exclude phrase") for v in _flatten((value,))))
         self._touch()
 
     @property
@@ -416,7 +429,7 @@ class Keyword:
 
     @require.setter
     def require(self, value: str | Iterable[str] | None) -> None:
-        self._require = list(dict.fromkeys(_clean(v, "require phrase") for v in _flatten((value,))))
+        self._require = list(dict.fromkeys(_context_phrase(v, "require phrase") for v in _flatten((value,))))
         self._touch()
 
     @property
@@ -556,10 +569,29 @@ class Keyword:
             return NotImplemented
         return self.to_dict() == other.to_dict()
 
+    # Ordering is by name only (so ``sorted(keywords)`` is alphabetical); equality compares content.
+    def _order_key(self) -> tuple[str, str]:
+        return (self._name.casefold(), self._name)
+
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, Keyword):
             return NotImplemented
-        return (self._name.casefold(), self._name) < (other._name.casefold(), other._name)
+        return self._order_key() < other._order_key()
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Keyword):
+            return NotImplemented
+        return self._order_key() <= other._order_key()
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Keyword):
+            return NotImplemented
+        return self._order_key() > other._order_key()
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Keyword):
+            return NotImplemented
+        return self._order_key() >= other._order_key()
 
     def __contains__(self, text: object) -> bool:
         """``"AI" in keyword`` -> is this one of the keyword's (non-pattern) terms?"""
