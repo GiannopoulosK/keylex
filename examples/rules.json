@@ -1,0 +1,16 @@
+{
+  "keywords": [
+    {"keyword": "Federal Reserve", "acronyms": ["Fed"], "category": "institution"},
+    {"keyword": "European Central Bank", "acronyms": ["ECB"], "category": "institution"}
+  ],
+  "rules": {
+    "monetary_policy": {
+      "rule": "CATEGORY(institution) AND (\"interest rate\" OR \"rate hike\" OR inflation)",
+      "weight": 3,
+      "description": "A central bank discussed together with rates or inflation"
+    },
+    "inflation_focus": {"rule": "ATLEAST(2, inflation)", "weight": 1},
+    "rate_decision": {"rule": "SENTENCE(CATEGORY(institution), \"interest rate\")", "weight": 2}
+  },
+  "options": {"stemmer": "light"}
+}

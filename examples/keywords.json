@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "keywords": [
+    {"keyword": "Federal Reserve", "acronyms": ["Fed"], "category": "institution"},
+    {"keyword": "European Central Bank", "acronyms": ["ECB"], "category": "institution"},
+    {"keyword": "interest rate", "synonyms": ["borrowing costs"], "category": "monetary"},
+    {"keyword": "inflation", "synonyms": ["price growth", "CPI"], "category": "monetary"},
+    {"keyword": "bank", "exclude": ["river", "shore"], "context_window": 5, "category": "finance"}
+  ]
+}

@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check keylex tests examples
+      - run: ruff format --check keylex tests examples
+      - run: mypy
+
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # spaCy may not ship wheels for the newest Python yet; its tests skip themselves then
+      - run: pip install -e ".[dev,all]" || pip install -e ".[dev,yaml,fast]"
+        shell: bash
+      - run: pytest --cov=keylex --cov-report=term-missing
+      # the core library must also work without the optional extras (numpy, spaCy)
+      - run: pip uninstall -y spacy thinc numpy && pytest -q
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        shell: bash
