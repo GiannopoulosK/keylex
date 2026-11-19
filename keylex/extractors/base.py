@@ -15,13 +15,29 @@ from rapidfuzz import fuzz
 
 from ..keyword import Keyword
 from ..keyword_list import KeywordList
-from ..stopwords import get_stopwords
+from ..stopwords import (
+    ENGLISH_STOPWORDS,
+    EXTRACTION_AMBIGUOUS,
+    EXTRACTION_STOPWORDS,
+    EXTRACTION_VERBS,
+    EXTRACTION_WEAK_END,
+    get_stopwords,
+)
 from ..text import light_stem, sentence_spans
 
 __all__ = ["BaseExtractor", "ExtractedKeyword", "PreparedText", "Word"]
 
 _MARKS = "̀-ͯ"  # combining accents (decomposed text) stay inside a word
+#: URLs, e-mail addresses, @handles and #hashtags: single tokens that never belong to a keyphrase.
+_JUNK_RE = (
+    r"(?:https?://|ftp://|www\.)[^\s<>\"'()\[\]{}]*[^\s<>\"'()\[\]{}.,;:!?]"  # URLs
+    r"|[\w.+-]+@[^\W_][\w-]*(?:\.[\w-]+)+"  # e-mail addresses
+    r"|(?<![\w@#&])[@#][^\W\d_]\w*"  # @handles, #hashtags
+    r"|(?<![\w/@.])[^\W_][\w-]*(?:\.[^\W_][\w-]*)+/[^\s<>\"']*[^\s<>\"'.,;:!?)]"  # example.com/path
+)
+_JUNK_FULL = re.compile(rf"(?:{_JUNK_RE})\Z")
 _WORD_RE = re.compile(
+    _JUNK_RE + r"|"
     rf"(?:[^\W\d_]\.){{2,}}(?![^\W_])"  # abbreviations: U.S., e.g.
     rf"|(?<![\w.])\.[^\W\d_][\w{_MARKS}]*"  # .NET, .js
     rf"|\d+(?:[.,]\d+)*(?![\w&+#{_MARKS}])"  # plain numbers: 2023, 5.3, 1,000
@@ -38,6 +54,20 @@ MAX_NAME_LENGTH = 6
 #: Part-of-speech tags (Universal POS) allowed in a phrase when a POS tagger is supplied.
 _NP_TAGS = frozenset({"NOUN", "PROPN", "ADJ", "NUM", "X", "SYM"})
 _NP_HEADS = frozenset({"NOUN", "PROPN", "X", "SYM"})
+
+#: Verb-like stopwords dropped from the default English list when a POS tagger decides instead.
+_TAGGER_DECIDES = (EXTRACTION_VERBS | frozenset({"announced", "reported", "asked", "added", "wanted"})) - (
+    ENGLISH_STOPWORDS
+)
+#: Words after which an ambiguous form ("need", "left", "falls") is read as a verb.
+_VERB_CUES = frozenset(
+    """
+    i we you they he she it who which will would shall should can could may might must do does did not
+    never also often always still just to is are was were be been being has have had having get gets got
+    don't doesn't didn't won't can't cannot wouldn't couldn't shouldn't isn't aren't wasn't weren't
+    """.split()
+)
+_AMBIGUOUS_BASES = frozenset(w for w in EXTRACTION_AMBIGUOUS if w not in EXTRACTION_WEAK_END and not w.endswith("s"))
 
 # --- connectors: stopwords allowed *inside* a phrase -------------------------------------------------
 #: "of"-like words: "Department of Defense", "state of the art".
@@ -88,6 +118,8 @@ class Word:
     possessive: bool = False  # "Apple's": a phrase may end here but not continue past it
     acronym: bool = False  # all-caps "US", "WHO", "AT&T": never a stopword, keeps its case as key
     pos: str | None = None  # Universal POS tag when a tagger was supplied
+    no_end: bool = False  # may start or sit inside a phrase but not end it ("left ventricle")
+    ambiguous: bool = False  # a verb/noun form read as a noun/adjective here ("the mean", "free fall")
 
     @property
     def key(self) -> str:
@@ -100,7 +132,13 @@ class Word:
 
     @property
     def bad_end(self) -> bool:
-        return self.is_stop or self.is_number or self.weak_end or (self.pos is not None and self.pos not in _NP_HEADS)
+        return (
+            self.is_stop
+            or self.is_number
+            or self.weak_end
+            or self.no_end
+            or (self.pos is not None and self.pos not in _NP_HEADS)
+        )
 
 
 def _is_weak_end(lower: str) -> bool:
@@ -117,6 +155,21 @@ def leading_modifier_ok(chunk: Sequence[Word], i: int) -> bool:
     if i + 1 >= len(chunk) or chunk[i + 1].capitalised:
         return False
     return i > 0 and chunk[i - 1].is_stop and not chunk[i - 1].acronym
+
+
+def _plural_looking(lower: str) -> bool:
+    return len(lower) > 3 and lower.endswith("s") and not lower.endswith(("ss", "us", "is"))
+
+
+def _reads_as_verb(lower: str, prev: Word) -> bool:
+    """Is the ambiguous form ``lower`` a verb after ``prev``? After a pronoun/auxiliary always; after a
+    content word, base forms only when it looks plural ("prices fall" but "free fall"), other forms
+    ("left", "falls") always ("the patient left", but "an enlarged left ventricle")."""
+    if prev.lower in _VERB_CUES:
+        return True
+    if prev.is_stop or prev.is_number or prev.weak_end or prev.possessive or prev.ambiguous:
+        return False
+    return lower not in _AMBIGUOUS_BASES or _plural_looking(prev.lower)
 
 
 def _is_acronym(surface: str) -> bool:
@@ -142,14 +195,25 @@ class PreparedText:
         self.words: list[Word] = []
         spans = sentence_spans(text) or [(0, len(text))]
         self.n_sentences = len(spans)
-        self._build(text, spans, stopwords, min_word_length)
+        tagged = pos_tags is not None
+        if tagged and language == "en" and stopwords is EXTRACTION_STOPWORDS:
+            stopwords = stopwords - _TAGGER_DECIDES  # real POS tags decide about verbs
+        self._build(text, spans, stopwords, min_word_length, heuristics=not tagged)
         self._fix_sentence_start_case()
         if pos_tags is not None:
             self._apply_pos(pos_tags)
         self._of = _OF_WORDS.get(language, frozenset())
 
-    def _build(self, text: str, spans: list[tuple[int, int]], stopwords: frozenset[str], min_word_length: int) -> None:
-        english = self.language == "en"
+    def _build(
+        self,
+        text: str,
+        spans: list[tuple[int, int]],
+        stopwords: frozenset[str],
+        min_word_length: int,
+        *,
+        heuristics: bool = True,
+    ) -> None:
+        english = self.language == "en" and heuristics  # verb heuristics stand in for a POS tagger
         chunk = 0
         for s_idx, (s, e) in enumerate(spans):
             chunk += 1
@@ -163,12 +227,29 @@ class PreparedText:
                 if prev_end is not None and text[prev_end : m.start()].strip():
                     chunk += 1  # punctuation between words breaks a phrase
                 surface = m.group()
+                if _JUNK_FULL.match(surface):  # URL, e-mail, @handle, #hashtag: never part of a phrase
+                    self.words.append(
+                        Word(surface, surface.lower(), m.start(), m.end(), s_idx, chunk, True, False, first, False)
+                    )
+                    first = False
+                    prev_end = m.end()
+                    continue
                 lower = surface.lower().replace("’", "'")
                 possessive = False
                 if len(lower) > 2 and lower.endswith("'s"):
                     lower, surface, possessive = lower[:-2], surface[:-2], True
                 is_number = not any(c.isalpha() for c in surface) and surface != "&"
                 acronym = not shouting and _is_acronym(surface)
+                is_stop = not acronym and (
+                    lower in stopwords or len(lower) < min_word_length or not any(c.isalnum() for c in lower)
+                )
+                no_end = ambiguous = False
+                if english and not acronym and not is_stop and lower in EXTRACTION_AMBIGUOUS:
+                    prev = self.words[-1] if self.words and self.words[-1].chunk == chunk else None
+                    if prev is not None and _reads_as_verb(lower, prev):
+                        is_stop = True  # "prices fall", "we need", "the patient left"
+                    else:
+                        ambiguous, no_end = True, lower in EXTRACTION_WEAK_END
                 self.words.append(
                     Word(
                         surface=surface,
@@ -177,13 +258,14 @@ class PreparedText:
                         end=m.start() + len(surface),
                         sentence=s_idx,
                         chunk=chunk,
-                        is_stop=not acronym
-                        and (lower in stopwords or len(lower) < min_word_length or not any(c.isalnum() for c in lower)),
+                        is_stop=is_stop,
                         is_number=is_number,
                         sentence_start=first,
-                        weak_end=english and not acronym and _is_weak_end(lower),
+                        weak_end=english and not acronym and not ambiguous and _is_weak_end(lower),
                         possessive=possessive,
                         acronym=acronym,
+                        no_end=no_end,
+                        ambiguous=ambiguous,
                     )
                 )
                 first = False
@@ -270,7 +352,7 @@ class PreparedText:
             if k > i:
                 if w.is_stop and not self.connector_ok(chunk, k):
                     return False
-                if w.weak_end:
+                if w.weak_end and not chunk[k - 1].ambiguous:
                     return False  # "banks raised interest": verbs only allowed as a leading modifier
                 if w.pos is not None and not w.is_stop and w.pos not in _NP_TAGS:
                     return False
@@ -370,9 +452,13 @@ class PreparedText:
         return any(w.is_stop for w in chunk[i + 1 : j - 1]) and not nxt.is_stop and not nxt.is_number
 
 
+def _norm_tokens(key: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(light_stem(t.lower().replace("-", "")) for t in key)
+
+
 def _norm(key: tuple[str, ...]) -> str:
     """Spelling-insensitive identity: "e-mail" == "email", "neural networks" == "neural network"."""
-    return " ".join(light_stem(t.lower().replace("-", "")) for t in key).replace(" ", "")
+    return "".join(_norm_tokens(key))
 
 
 def _similarity(a: frozenset[str], b: frozenset[str]) -> float:
@@ -400,10 +486,22 @@ class _Collector:
     def surface(self, key: tuple[str, ...]) -> str:
         return self.surfaces[key].most_common(1)[0][0]
 
+    def merge(self, into: tuple[str, ...], other: tuple[str, ...]) -> None:
+        """Count the occurrences of ``other`` (a variant spelling) as occurrences of ``into``."""
+        self.count[into] += self.count.pop(other, 0)
+        self.positions[into] = sorted({*self.positions.get(into, ()), *self.positions.pop(other, ())})
 
-def _check_top_n(value: object, name: str = "top_n") -> int:
+
+#: ``top_n`` of an extractor created with ``top_n=None``.
+DEFAULT_TOP_N = 10
+
+
+def _check_top_n(value: object, default: int = DEFAULT_TOP_N) -> int:
+    """A positive integer; ``None`` means ``default``."""
+    if value is None:
+        return default
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be a positive integer (or None for the default), got {value!r}")
+        raise ValueError(f"top_n must be a positive integer (or None for the default), got {value!r}")
     return value
 
 
@@ -411,7 +509,8 @@ class BaseExtractor(ABC):
     """Base class for extractors.
 
     Args:
-        top_n: How many keywords :meth:`extract` returns by default (a positive integer).
+        top_n: How many keywords :meth:`extract` returns by default (a positive integer; ``None``
+            means :data:`DEFAULT_TOP_N`).
         max_ngram: Longest phrase (in words) to consider. Runs of capitalised words (names such as
             "ECB President Christine Lagarde") may be longer, up to :data:`MAX_NAME_LENGTH` words.
         stopwords: Iterable of stopwords; overrides ``language``.
@@ -433,7 +532,7 @@ class BaseExtractor(ABC):
 
     def __init__(
         self,
-        top_n: int = 10,
+        top_n: int | None = DEFAULT_TOP_N,
         *,
         max_ngram: int = 3,
         stopwords: Iterable[str] | None = None,
@@ -492,7 +591,7 @@ class BaseExtractor(ABC):
         """
         if not isinstance(text, str):
             raise TypeError("text must be a str")
-        n = self.top_n if top_n is None else _check_top_n(top_n)
+        n = _check_top_n(top_n, self.top_n)
         prepared = self.prepare(text)
         if not prepared.words:
             return []
@@ -517,28 +616,50 @@ class BaseExtractor(ABC):
         self, ranked: list[tuple[str, ...]], scores: dict[tuple[str, ...], float], collector: _Collector, limit: int
     ) -> list[tuple[tuple[str, ...], float]]:
         """Best-first candidates without near-duplicates; a shorter phrase that never occurs outside a
-        longer, lower-ranked one is replaced by it (keeping the better score)."""
+        longer, lower-ranked one is replaced by it (keeping the better score).
+
+        Occurrences of a dropped spelling variant ("neural networks", "e-mail") are pooled into the
+        phrase that is kept, so its ``count`` covers all of them and fragments of it ("deep neural")
+        are recognised as such.
+        """
         if not self.deduplicate:
             return [(k, scores[k]) for k in ranked[:limit]]
-        count = collector.count
-        out: list[tuple[tuple[str, ...], float]] = []
-        seen: list[tuple[str, str]] = []  # (normalised, lower)
+        # 1. pool spelling variants (same normalised form) into the best-ranked one
+        by_norm: dict[str, tuple[str, ...]] = {}
+        unique: list[tuple[str, ...]] = []
         for key in ranked:
-            if any(_is_subsequence(key, c) and count[key] <= count[c] for c, _ in out):
+            norm = _norm(key)
+            rep = by_norm.get(norm)
+            if rep is None:
+                by_norm[norm] = key
+                unique.append(key)
+            else:
+                collector.merge(rep, key)
+        count = collector.count
+        tokens = {key: _norm_tokens(key) for key in unique}
+        out: list[tuple[tuple[str, ...], float]] = []
+        seen: list[str] = []  # lowercased phrases of ``out``
+        for key in unique:
+            toks = tokens[key]
+            if any(_is_subsequence(toks, tokens[c]) and count[key] <= count[c] for c, _ in out):
                 continue  # never occurs outside a better-ranked phrase
             lower = " ".join(key).lower()
-            norm = _norm(key)
-            if any(norm == s or fuzz.ratio(lower, low) >= self.dedup_threshold for s, low in seen):
+            dup = next((i for i, low in enumerate(seen) if fuzz.ratio(lower, low) >= self.dedup_threshold), None)
+            if dup is not None:  # a near-duplicate of a kept phrase
+                if len(out[dup][0]) == len(key):  # a typo-level variant ("recieve"): same occurrences
+                    collector.merge(out[dup][0], key)
                 continue
-            absorbed = [i for i, (c, _) in enumerate(out) if _is_subsequence(c, key) and count[c] <= count[key]]
+            absorbed = [
+                i for i, (c, _) in enumerate(out) if _is_subsequence(tokens[c], toks) and count[c] <= count[key]
+            ]
             if absorbed:
                 first = absorbed[0]
                 out[first] = (key, out[first][1])
-                seen[first] = (norm, lower)
+                seen[first] = lower
                 for i in reversed(absorbed[1:]):
                     del out[i], seen[i]
                 continue
-            seen.append((norm, lower))
+            seen.append(lower)
             out.append((key, scores[key]))
             if len(out) >= limit:
                 break

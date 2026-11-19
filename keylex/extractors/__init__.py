@@ -34,7 +34,7 @@ def get_extractor(method: str = "yake", **kwargs: Any) -> BaseExtractor:
     return cls(**kwargs)
 
 
-def extract_keywords(text: str, top_n: int = 10, method: str = "yake", **kwargs: Any) -> list[ExtractedKeyword]:
+def extract_keywords(text: str, top_n: int | None = 10, method: str = "yake", **kwargs: Any) -> list[ExtractedKeyword]:
     """Extract the ``top_n`` most important keywords/keyphrases from ``text``."""
     return get_extractor(method, top_n=top_n, **kwargs).extract(text)
 

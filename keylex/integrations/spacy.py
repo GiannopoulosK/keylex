@@ -13,6 +13,10 @@ Add keylex as a pipeline component::
     span._.keylex_matches        # every Match behind a span (identical spans of several keywords)
     span._.keylex_match          # the first of them
 
+Matches are kept in ``doc.user_data`` as plain data, so processed docs survive ``doc.to_bytes()``,
+``DocBin(store_user_data=True)`` and ``nlp.pipe(..., n_process=2)``; several keylex components add to
+``doc._.keylex_matches``.
+
 The component's keywords and options are saved with ``nlp.to_disk`` / ``nlp.to_bytes`` and restored
 by ``spacy.load`` / ``nlp.from_bytes``, including keywords given via :func:`add_to_pipeline`.
 
@@ -22,8 +26,11 @@ Or convert keywords into EntityRuler token patterns with :func:`to_entity_ruler_
 from __future__ import annotations
 
 import json
+import uuid
 import warnings
+import weakref
 from collections.abc import Callable, Iterable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -51,30 +58,78 @@ __all__ = [
 LABEL_MODES = ("category", "keyword", "fixed")
 ALIGNMENT_MODES = ("strict", "contract", "expand")
 
-#: ``doc.user_data`` key of the ``{(token_start, token_end): [Match, ...]}`` index behind
-#: ``span._.keylex_matches`` (span extensions are otherwise stored per character offsets, so two
-#: keywords matching the same span would overwrite each other).
+#: ``doc.user_data`` keys. Matches are stored as plain rows (see :func:`_to_row`) so docs stay
+#: serialisable (``doc.to_bytes()``, ``DocBin(store_user_data=True)``, ``nlp.pipe(n_process=...)``);
+#: the extension getters rebuild :class:`Match` objects from them.
+_MATCHES_KEY = ("keylex", "matches")
+#: ``{"token_start:token_end": [row, ...]}`` index behind ``span._.keylex_matches`` (span extensions
+#: are otherwise stored per character offsets, so two keywords matching the same span would overwrite
+#: each other).
 _INDEX_KEY = ("keylex", "span_matches")
 
 #: Factory options that configure the matcher (everything else configures the component).
 _MATCHER_KEYS = ("match_type", "threshold", "overlaps", "stemmer", "ignore_accents")
 _COMPONENT_KEYS = ("spans_key", "set_ents", "overwrite_ents", "label", "default_label", "alignment_mode")
 
+_Row = tuple[Any, ...]
+_ROW_FIELDS = 9  # keyword, start, end, text, term, kind, method, score, category (+ component token)
 
-def _span_index(doc: Doc) -> dict[tuple[int, int], list[Match]]:
-    user_data: dict[Any, Any] = doc.user_data
+#: Live components by token, so ``Match.keyword_obj`` can be restored for docs that went through
+#: serialisation (e.g. ``nlp.pipe(n_process=2)``) while the component is still around.
+_COMPONENTS: weakref.WeakValueDictionary[str, KeylexComponent] = weakref.WeakValueDictionary()
+#: The original :class:`Match` objects (with ``keyword_obj``) of docs processed in this process.
+_LIVE: weakref.WeakKeyDictionary[Doc, dict[_Row, Match]] = weakref.WeakKeyDictionary()
+
+
+def _to_row(doc: Doc, m: Match, token: str | None = None) -> _Row:
+    """A msgpack-friendly row for ``m``; the live object is remembered for :func:`_from_row`."""
+    row: _Row = (m.keyword, m.start, m.end, m.text, m.term, m.kind, m.method, float(m.score), m.category, token)
+    if m.keyword_obj is not None:
+        live = _LIVE.get(doc)
+        if live is None:
+            live = _LIVE[doc] = {}
+        live[tuple(row[:_ROW_FIELDS])] = m
+    return row
+
+
+def _from_row(doc: Doc, row: Sequence[Any]) -> Match:
+    key = tuple(row[:_ROW_FIELDS])
+    live = _LIVE.get(doc)
+    if live is not None and key in live:
+        return live[key]
+    m = Match(*key)
+    token = row[_ROW_FIELDS] if len(row) > _ROW_FIELDS else None
+    component = _COMPONENTS.get(token) if isinstance(token, str) else None
+    if component is not None:
+        kw = component.keyword_list.get(m.keyword)
+        if kw is not None:
+            m = replace(m, keyword_obj=kw)
+    return m
+
+
+def _user_data(doc: Doc) -> dict[Any, Any]:
+    data: dict[Any, Any] = doc.user_data
+    return data
+
+
+def _span_index(doc: Doc) -> dict[str, list[_Row]]:
+    user_data = _user_data(doc)
     index = user_data.get(_INDEX_KEY)
     if index is None:
         index = user_data[_INDEX_KEY] = {}
     return index
 
 
+def _span_key(span: Span) -> str:
+    return f"{span.start}:{span.end}"
+
+
 def _get_span_matches(span: Span) -> list[Match]:
-    return list(_span_index(span.doc).get((span.start, span.end), ()))
+    return [_from_row(span.doc, r) for r in _span_index(span.doc).get(_span_key(span), ())]
 
 
 def _get_span_match(span: Span) -> Match | None:
-    found = _span_index(span.doc).get((span.start, span.end))
+    found = _get_span_matches(span)
     if not found:
         return None
     # identical spans with different labels: prefer the match the label came from
@@ -84,15 +139,42 @@ def _get_span_match(span: Span) -> Match | None:
 
 def _set_span_match(span: Span, value: Match | None) -> None:
     index = _span_index(span.doc)
+    key = _span_key(span)
     if value is None:
-        index[(span.start, span.end)] = []
+        index[key] = []
     else:  # the given match becomes the first; the others stay available via keylex_matches
-        others = [m for m in index.get((span.start, span.end), ()) if m != value]
-        index[(span.start, span.end)] = [value, *others]
+        row = _to_row(span.doc, value)
+        others = [r for r in index.get(key, ()) if tuple(r[:_ROW_FIELDS]) != row[:_ROW_FIELDS]]
+        index[key] = [row, *others]
 
 
-if not Doc.has_extension("keylex_matches"):
-    Doc.set_extension("keylex_matches", default=None)
+def _get_doc_matches(doc: Doc) -> list[Match] | None:
+    rows = _user_data(doc).get(_MATCHES_KEY)
+    if rows is None:
+        return None
+    return [_from_row(doc, r) for r in rows]
+
+
+def _set_doc_matches(doc: Doc, value: Iterable[Match] | None) -> None:
+    if value is None:
+        _user_data(doc).pop(_MATCHES_KEY, None)
+    else:
+        _user_data(doc)[_MATCHES_KEY] = [_to_row(doc, m) for m in value]
+
+
+def _add_doc_matches(doc: Doc, matches: Iterable[Match], token: str | None) -> None:
+    """Append to ``doc._.keylex_matches`` (several keylex components accumulate)."""
+    rows = list(_user_data(doc).get(_MATCHES_KEY) or ())
+    seen = {tuple(r[:_ROW_FIELDS]) for r in rows}
+    for m in matches:
+        row = _to_row(doc, m, token)
+        if row[:_ROW_FIELDS] not in seen:
+            seen.add(row[:_ROW_FIELDS])
+            rows.append(row)
+    _user_data(doc)[_MATCHES_KEY] = rows
+
+
+Doc.set_extension("keylex_matches", getter=_get_doc_matches, setter=_set_doc_matches, force=True)
 Span.set_extension("keylex_match", getter=_get_span_match, setter=_set_span_match, force=True)
 Span.set_extension("keylex_matches", getter=_get_span_matches, force=True)
 
@@ -105,7 +187,14 @@ def _label_for(m: Match, mode: str, fixed: str) -> str:
     return m.category or fixed
 
 
-def _spans_for(doc: Doc, matches: Iterable[Match], label: str, default_label: str, alignment_mode: str) -> list[Span]:
+def _spans_for(
+    doc: Doc,
+    matches: Iterable[Match],
+    label: str,
+    default_label: str,
+    alignment_mode: str,
+    token: str | None = None,
+) -> list[Span]:
     if label not in LABEL_MODES:
         raise ValueError(f"label must be one of {LABEL_MODES}")
     if alignment_mode not in ALIGNMENT_MODES:
@@ -118,9 +207,11 @@ def _spans_for(doc: Doc, matches: Iterable[Match], label: str, default_label: st
         span = doc.char_span(m.start, m.end, label=lab, alignment_mode=alignment_mode)
         if span is None or not len(span):
             continue  # not aligned to token boundaries
-        bucket = index.setdefault((span.start, span.end), [])
-        if m not in bucket:
-            bucket.append(m)
+        key = _span_key(span)
+        bucket = list(index.get(key, ()))
+        row = _to_row(doc, m, token)
+        if all(tuple(r[:_ROW_FIELDS]) != row[:_ROW_FIELDS] for r in bucket):
+            index[key] = [*bucket, row]
         if (span.start, span.end, lab) not in seen:
             seen.add((span.start, span.end, lab))
             spans.append(span)
@@ -192,12 +283,14 @@ class KeylexComponent:
         self.default_label = default_label
         self.alignment_mode = alignment_mode
         self.matcher_options: dict[str, Any] = dict(matcher_options or {})
+        self._token = uuid.uuid4().hex
+        _COMPONENTS[self._token] = self
 
     # -- processing ---------------------------------------------------------------------------------
     def __call__(self, doc: Doc) -> Doc:
         matches = self.matcher.find(doc.text)
-        doc._.keylex_matches = list(matches)
-        spans = _spans_for(doc, matches, self.label, self.default_label, self.alignment_mode)
+        _add_doc_matches(doc, matches, self._token)
+        spans = _spans_for(doc, matches, self.label, self.default_label, self.alignment_mode, self._token)
         if self.spans_key:
             doc.spans[self.spans_key] = spans
         if self.set_ents:
@@ -315,7 +408,18 @@ def make_keylex_component(
         ".yaml",
         ".yml",
     ):
-        kl = KeywordList.load(keywords)
+        if Path(keywords).exists():
+            kl = KeywordList.load(keywords)
+        else:
+            # ``spacy.load`` rebuilds the component from the saved config (which still names the file)
+            # before ``from_disk`` restores the saved keywords, so a moved/deleted file must not fail here.
+            warnings.warn(
+                f"keylex: keyword file {str(keywords)!r} not found; the component starts without keywords "
+                "(a pipeline loaded with spacy.load / from_disk restores its saved keywords)",
+                UserWarning,
+                stacklevel=2,
+            )
+            kl = KeywordList()
     else:
         kl = as_keyword_list(keywords)
     opts: dict[str, Any] = {
@@ -388,7 +492,9 @@ def to_entity_ruler_patterns(
 
     Case-sensitive terms (acronyms such as ``NASA``, or ``case_sensitive=True`` on the term/keyword,
     else the ``case_sensitive`` default) use ``ORTH`` attributes, all others ``LOWER``, so the ruler
-    agrees with :class:`KeywordMatcher` regardless of ``phrase_matcher_attr``. Terms are tokenised
+    agrees with :class:`KeywordMatcher` regardless of ``phrase_matcher_attr``; acronyms also get their
+    dotted form ("US" -> spaCy's "U.S." token). ``label`` works as in :func:`match_spans` (any other
+    string is used as the label itself). Terms are tokenised
     with ``nlp``'s tokenizer (default: ``spacy.blank("en")``). Pattern ``id`` is the canonical keyword
     name, so ``ent.ent_id_`` tells you which keyword hit. Regex pattern terms cannot be expressed
     and are skipped with a warning.
@@ -404,16 +510,28 @@ def to_entity_ruler_patterns(
             lab = kw.name
         elif label == "category":
             lab = kw.category or default_label
+        elif label == "fixed":
+            lab = default_label
         else:
             lab = label
         skipped.extend(t.text for t in kw.iter_terms("pattern"))
+        seen: set[str] = set()
         for term in kw.iter_terms("keyword", "synonym", "acronym", "variant"):
             cs = _term_case_sensitive(kw, term, case_sensitive)
-            tokens = [t.text for t in tokenizer(term.text) if not t.is_space]
-            if not tokens:
-                continue
-            pattern = [{"ORTH": t} if cs else {"LOWER": t.lower()} for t in tokens]
-            patterns.append({"label": lab, "pattern": pattern, "id": kw.name})
+            forms = [term.text]
+            text = term.text
+            if term.is_acronym_like and text.isalpha() and 2 <= len(text) <= 6:
+                forms.append("".join(f"{ch}." for ch in text))  # "US" also matches "U.S." (like the matcher)
+            for form in forms:
+                tokens = [t.text for t in tokenizer(form) if not t.is_space]
+                if not tokens:
+                    continue
+                pattern = [{"ORTH": t} if cs else {"LOWER": t.lower()} for t in tokens]
+                ident = json.dumps(pattern, sort_keys=True)
+                if ident in seen:
+                    continue
+                seen.add(ident)
+                patterns.append({"label": lab, "pattern": pattern, "id": kw.name})
     if skipped:
         warnings.warn(
             f"to_entity_ruler_patterns: skipped {len(skipped)} regex pattern term(s) the EntityRuler cannot "

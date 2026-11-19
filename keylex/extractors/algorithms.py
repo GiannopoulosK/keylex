@@ -26,7 +26,7 @@ class YakeExtractor(BaseExtractor):
 
     name = "yake"
 
-    def __init__(self, top_n: int = 10, *, window: int = 2, **kwargs: Any) -> None:
+    def __init__(self, top_n: int | None = 10, *, window: int = 2, **kwargs: Any) -> None:
         super().__init__(top_n, **kwargs)
         self.window = window
 
@@ -93,7 +93,7 @@ class RakeExtractor(BaseExtractor):
 
     name = "rake"
 
-    def __init__(self, top_n: int = 10, *, max_ngram: int = 4, **kwargs: Any) -> None:
+    def __init__(self, top_n: int | None = 10, *, max_ngram: int = 4, **kwargs: Any) -> None:
         super().__init__(top_n, max_ngram=max_ngram, **kwargs)
 
     def _segments(self, chunk: list[Word]) -> Iterator[list[Word]]:
@@ -102,7 +102,9 @@ class RakeExtractor(BaseExtractor):
         run: list[Word] = []
         for k, w in enumerate(chunk):
             content = not w.is_stop and not w.is_number and (w.pos is None or w.pos in _NP_TAGS)
-            if content and w.weak_end and run:
+            # "-ed" after an ambiguous noun/adjective stays inside ("mean squared error")
+            modifier = bool(run) and run[-1].ambiguous
+            if content and w.weak_end and run and not modifier:
                 yield run
                 run = []
             if not content:
@@ -110,7 +112,7 @@ class RakeExtractor(BaseExtractor):
                     yield run
                 run = []
                 continue
-            if w.weak_end and not leading_modifier_ok(chunk, k):
+            if w.weak_end and not modifier and not leading_modifier_ok(chunk, k):
                 continue  # a verb ("praised Apple"), not a leading adjective ("a distributed store")
             run.append(w)
             if w.possessive:
@@ -163,7 +165,7 @@ class TextRankExtractor(BaseExtractor):
     name = "textrank"
 
     def __init__(
-        self, top_n: int = 10, *, window: int = 3, damping: float = 0.85, iterations: int = 50, **kwargs: Any
+        self, top_n: int | None = 10, *, window: int = 3, damping: float = 0.85, iterations: int = 50, **kwargs: Any
     ) -> None:
         super().__init__(top_n, **kwargs)
         self.window = window
@@ -218,7 +220,7 @@ class TfidfExtractor(BaseExtractor):
 
     name = "tfidf"
 
-    def __init__(self, top_n: int = 10, *, corpus: Iterable[str] | None = None, **kwargs: Any) -> None:
+    def __init__(self, top_n: int | None = 10, *, corpus: Iterable[str] | None = None, **kwargs: Any) -> None:
         super().__init__(top_n, **kwargs)
         self.df: Counter[tuple[str, ...]] = Counter()
         self.n_docs = 0
@@ -232,7 +234,7 @@ class TfidfExtractor(BaseExtractor):
         return keys
 
     def fit(self, corpus: Iterable[str]) -> TfidfExtractor:
-        """Learn document frequencies from a corpus (an iterable of strings). Returns ``self``."""
+        """Learn document frequencies from a corpus (a non-empty iterable of strings). Returns ``self``."""
         if isinstance(corpus, (str, bytes)):
             raise TypeError("corpus must be an iterable of documents (e.g. a list of str), not a single string")
         df: Counter[tuple[str, ...]] = Counter()
@@ -242,6 +244,8 @@ class TfidfExtractor(BaseExtractor):
                 raise TypeError(f"corpus documents must be str, got {type(doc).__name__}")
             df.update(self._keys(self.prepare(doc)))
             n_docs += 1
+        if not n_docs:
+            raise ValueError("corpus is empty: fit() needs at least one document")
         self.df, self.n_docs = df, n_docs
         return self
 

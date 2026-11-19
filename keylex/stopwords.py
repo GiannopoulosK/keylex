@@ -360,12 +360,19 @@ _VERB_BASES = """
     accept achieve add adjust agree allow appear apply argue arrive ask assume avoid become begin believe
     belong bring buy carry choose come consider consist contain continue create decide deliver depend
     describe determine develop discuss enable encourage ensure enter establish exist expect explain expose
-    fail fall feel find follow get give go grow happen hold hope identify imply improve include indicate
-    involve keep know learn leave let lie live look lose maintain manage mean meet mention obtain occur
-    operate prefer prepare prevent produce propose protect prove provide publish raise reach realise realize
+    fail feel find follow get give go grow happen identify imply improve include indicate
+    involve keep know learn leave let lose maintain manage meet obtain occur
+    operate prefer prepare prevent produce propose protect prove provide publish realise realize
     receive recognise recognize reduce refer reflect rely remain remember remove replace represent require
-    respond reveal say see seek seem send serve sit speak spend stand stay suggest suppose take talk tell
-    tend think try understand want warn wear win wish wonder worry wrap write need praise expand invest
+    respond reveal say see seek seem send serve sit speak spend stay suggest suppose take tell
+    tend think try understand want warn wonder write expand invest
+"""
+
+#: Base forms of verbs that are just as often nouns or adjectives ("mean squared error", "free fall",
+#: "talk show"). They are not stopwords: the extractors read them as verbs only after a subject-like
+#: word ("prices fall", "we need") and as ordinary content words otherwise.
+_AMBIGUOUS_BASES = """
+    fall hold hope lie live look mean need praise raise reach stand talk wear win wish worry wrap
 """
 
 
@@ -380,18 +387,36 @@ def _third_person(verb: str) -> str:
 #: Common English verbs and verb forms that are rarely nouns: base and 3rd-person "-s" forms,
 #: auxiliaries, irregular past/participle forms. A keyphrase should neither start nor end with one
 #: ("cluster consists", "control plane runs"), so the English extractors treat them as stopwords.
-#: Regular "-ed" forms are handled by a separate heuristic.
+#: Regular "-ed" forms are handled by a separate heuristic, ambiguous forms ("mean", "left") by
+#: :data:`EXTRACTION_AMBIGUOUS`.
 EXTRACTION_VERBS: frozenset[str] = frozenset(
     [v for base in _VERB_BASES.split() for v in (base, _third_person(base))]
     + """
     is are was were be been being am has have had having do does did done doing will would shall should
     can could may might must ought
-    became began begun bought brought built came chose chosen fell fallen felt found gave given got gotten
-    goes went gone grew grown held kept knew known led left lost made makes meant met paid ran runs running
-    rose risen said saw seen sent sold spent stood took taken told thought won wore wrote written
+    became began begun bought brought came chose felt gave got gotten
+    goes went gone grew knew led makes meant met ran runs
+    rose risen said saw seen sent sold stood took told thought won wore wrote
     slows slowed adding including following according remaining continuing becoming expecting staying
     sought caught taught dealt drew drove fought flew forgot spoke struck threw automate automates
     """.split()
+)
+
+#: Ambiguous words (participles, "number") that may start or sit inside a keyphrase but never end
+#: one ("left ventricle", "number theory", but not "the patient left" or "a number").
+EXTRACTION_WEAK_END: frozenset[str] = frozenset(
+    """
+    built chosen fallen fell found given grown held kept known left lost made paid running spent taken
+    written number
+    """.split()
+)
+
+#: Verb forms that may also be nouns/adjectives. The English extractors resolve them from the
+#: preceding word: after a subject-like word they act as verbs (stopwords), otherwise they are
+#: content words ("the mean squared error", "an enlarged left ventricle", "free fall"); words of
+#: :data:`EXTRACTION_WEAK_END` still never end a phrase.
+EXTRACTION_AMBIGUOUS: frozenset[str] = (
+    frozenset(v for base in _AMBIGUOUS_BASES.split() for v in (base, _third_person(base))) | EXTRACTION_WEAK_END
 )
 
 #: Extra words that rarely belong in a key phrase: frequent verbs (see :data:`EXTRACTION_VERBS`),
@@ -403,13 +428,13 @@ EXTRACTION_STOPWORDS: frozenset[str] = (
         """
         announced reported asked added wanted last
         day days week weeks month months year years
-        number lot lots kind kinds way ways thing things
+        lot lots kind kinds way ways thing things
         monday tuesday wednesday thursday friday saturday sunday today yesterday tomorrow
         january february march april june july august september october november december
         e.g. i.e. etc. vs. cf. mr mrs ms dr
         """.split()
     )
-)
+) - EXTRACTION_AMBIGUOUS
 
 #: Compact stopword lists for other languages (function words and a few very common verbs), selected
 #: by the extractors with ``language="de"`` etc. Pass ``stopwords=`` for anything more specialised.
@@ -490,8 +515,10 @@ def get_stopwords(language: str = "en") -> frozenset[str]:
 
 
 __all__ += [
+    "EXTRACTION_AMBIGUOUS",
     "EXTRACTION_STOPWORDS",
     "EXTRACTION_VERBS",
+    "EXTRACTION_WEAK_END",
     "FRENCH_STOPWORDS",
     "GERMAN_STOPWORDS",
     "GREEK_STOPWORDS",
