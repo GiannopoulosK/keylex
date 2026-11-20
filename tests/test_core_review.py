@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -175,12 +176,12 @@ def test_live_recompile_fast_path_still_sees_changes():
     assert [m.keyword for m in matcher.find("alpha delta")] == ["delta"]
 
 
-def test_many_short_texts_with_large_vocabulary_is_fast():
+def test_many_short_texts_with_large_vocabulary_is_fast(time_budget: Callable[[float, float], None]):
     matcher = KeywordMatcher([f"term{i}" for i in range(20_000)]).compile()
     texts = [f"hello term{i}" for i in range(2_000)]
     t = time.perf_counter()
     assert sum(len(r) for r in matcher.match_many(texts)) == 2_000
-    assert time.perf_counter() - t < 2.0
+    time_budget(t, 2.0)
 
 
 # --------------------------------------------------------------------------- fuzzy batching

@@ -9,6 +9,7 @@ import random
 import sys
 import time
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -58,16 +59,16 @@ def _synthetic(n_words: int, vocab: int = 20) -> Document:
     return Document(text, matches)
 
 
-def test_near_is_fast_on_large_documents():
+def test_near_is_fast_on_large_documents(time_budget: Callable[[float, float], None]):
     doc = _synthetic(20_000)
     rule = parse_rule("NEAR(CATEGORY(c), CATEGORY(c), 5)")
     t0 = time.perf_counter()
     result = doc.evaluate(rule)
-    assert time.perf_counter() - t0 < 2.0
+    time_budget(t0, 2.0)
     assert result.matched and result.count == 10_000  # disjoint neighbour pairs
     t0 = time.perf_counter()
     assert doc.evaluate(parse_rule("BEFORE(k1, k2, 3)")).count == 1000
-    assert time.perf_counter() - t0 < 2.0
+    time_budget(t0, 2.0)
 
 
 def _brute_force(doc: Document, rule: Near, a: list[Match], b: list[Match]) -> set[Match]:

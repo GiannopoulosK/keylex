@@ -18,8 +18,8 @@ jobs:
     name: Lint & type-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -39,8 +39,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: true
@@ -60,20 +60,24 @@ jobs:
     name: Build & check distributions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install build twine
       - run: python -m build
       - run: twine check --strict dist/*
-      # the sdist must be self-contained: install it and run its own test suite
+      # The sdist must be self-contained: install it and run its own test suite against the
+      # *installed* package. The unpacked source is removed first; otherwise --doctest-modules
+      # collects it next to the installed copy and pytest aborts with "import file mismatch".
+      # (Doctests run in the test matrix.)
       - name: Test the sdist
         shell: bash
         run: |
           mkdir sdist-test && tar xzf dist/*.tar.gz -C sdist-test --strip-components=1
-          cd sdist-test && pip install ".[dev]" && pytest -q -p no:cacheprovider
-      - uses: actions/upload-artifact@v4
+          cd sdist-test && pip install ".[dev]" && rm -rf keylex
+          pytest tests -q -p no:cacheprovider
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/

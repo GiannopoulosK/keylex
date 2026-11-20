@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from keylex import ExactMatcher, FuzzyMatcher, Keyword, KeywordList, KeywordMatcher, Match, Term, highlight
@@ -154,7 +156,7 @@ def test_exact_and_fuzzy_subclasses():
     assert "KeywordMatcher(1 keywords" in repr(ExactMatcher(["x"]))
 
 
-def test_large_vocabulary_is_fast():
+def test_large_vocabulary_is_fast(time_budget: Callable[[float, float], None]):
     import time
 
     words = [f"term{i}" for i in range(5000)]
@@ -163,4 +165,4 @@ def test_large_vocabulary_is_fast():
     t = time.perf_counter()
     found = m.find(text)
     assert len(found) == len(words[::7]) * 20
-    assert time.perf_counter() - t < 5
+    time_budget(t, 5)

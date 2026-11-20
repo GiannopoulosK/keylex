@@ -6,6 +6,7 @@ import pickle
 import threading
 import time
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -252,21 +253,21 @@ def test_fuzzy_windows_still_cross_abbreviations_and_matching_punctuation() -> N
     assert {x.keyword for x in m.find("Dr. Smithsen met Smith, Jonson")} == {"Dr. Smithson", "Smith, Johnson"}
 
 
-def test_drop_fuzzy_shadowed_is_not_quadratic() -> None:
+def test_drop_fuzzy_shadowed_is_not_quadratic(time_budget: Callable[[float, float], None]) -> None:
     exact = [Match("k", i * 10, i * 10 + 5, "x", "x") for i in range(20_000)]
     fuzzy = [Match("k", i * 10 + 6, i * 10 + 9, "y", "y", method="fuzzy") for i in range(20_000)]
     overlapping = Match("k", 3, 7, "z", "z", method="fuzzy")
     t0 = time.perf_counter()
     kept = drop_fuzzy_shadowed([*exact, *fuzzy, overlapping])
-    assert time.perf_counter() - t0 < 2
+    time_budget(t0, 2)
     assert len(kept) == 40_000 and overlapping not in kept
 
 
-def test_fuzzy_on_repetitive_text_is_fast() -> None:
+def test_fuzzy_on_repetitive_text_is_fast(time_budget: Callable[[float, float], None]) -> None:
     m = KeywordMatcher(["machine learning"], "fuzzy")
     t0 = time.perf_counter()
     assert len(m.find("machine learning is fun. " * 8000)) == 8000
-    assert time.perf_counter() - t0 < 5
+    time_budget(t0, 5)
 
 
 # ---------------------------------------------------------------- highlight
@@ -308,15 +309,30 @@ def test_invisible_only_terms_are_rejected(term: str) -> None:
         Keyword("x", synonyms=[term])
 
 
-def test_normalisation_fast_paths() -> None:
-    base = "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440. " * 100_000  # 1.3M chars of Cyrillic
+def test_normalisation_fast_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Checked by counting unicodedata.normalize calls, not by timing (stable on slow CI runners)."""
+    import keylex.text
+
+    calls = 0
+    real = unicodedata.normalize
+
+    def counting(form: str, text: str) -> str:
+        nonlocal calls
+        calls += 1
+        return real(form, text)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(keylex.text.unicodedata, "normalize", counting)
+    base = "\u041f\u0440\u0438\u0432\u0435\u0442 \u043c\u0438\u0440. " * 100  # Cyrillic, already NFKC
+
+    # an ignorable character in normalised text must not trigger per-cluster normalisation
     soft = base + "co\u00adoperation"
-    t0 = time.perf_counter()
     normalized, offsets = normalize_text(soft)
-    assert time.perf_counter() - t0 < 1.0
+    assert calls == 0
     assert normalized.endswith("cooperation") and offsets is not None
     assert offsets.span(len(normalized) - 11, len(normalized)) == (len(soft) - 12, len(soft))
-    nfd = base + unicodedata.normalize("NFD", "\u00e9")
-    t0 = time.perf_counter()
+
+    # the slow path normalises each cluster once; the composition check only runs for the few
+    # characters that can compose with their predecessor (it used to cost 3 calls per character)
+    nfd = base + real("NFD", "\u00e9")
     assert normalize_text(nfd)[0].endswith("\u00e9")
-    assert time.perf_counter() - t0 < 3.0
+    assert calls <= len(nfd)
