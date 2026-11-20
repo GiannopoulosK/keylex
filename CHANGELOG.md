@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-11-19
+## [0.1.0] - 2026-11-20
 
 A rewrite of the matching core plus four new subsystems: rules, keyword extraction, spaCy
 integration and a CLI. Over 700 tests (including every README example), `mypy --strict` clean,
