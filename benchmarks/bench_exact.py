@@ -28,7 +28,7 @@ SYLLABLES = "ka lo mi nu pe ra si to vu xe za bo da fi gu he ji ko lu ma ne".spl
 def make_lexicon(n: int, rng: random.Random) -> list[str]:
     words: set[str] = set()
     while len(words) < n:
-        words.add("".join(rng.choice(SYLLABLES) for _ in range(rng.randint(2, 4))))
+        words.add("".join(rng.choice(SYLLABLES) for _ in range(rng.randint(2, 6))))
     return sorted(words)
 
 
