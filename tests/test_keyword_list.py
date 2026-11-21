@@ -107,6 +107,25 @@ def test_save_and_load(tmp_path, kl: KeywordList, suffix: str):
     assert loaded["bank"].category == "finance"
 
 
+@pytest.mark.parametrize(
+    ("suffix", "content", "message"),
+    [
+        (".json", "{not json", "invalid JSON"),
+        (".yaml", "bank: [unclosed\n", "invalid YAML"),
+        (".csv", "keyword,metadata\nbank,{bad}\n", "invalid JSON in CSV field"),
+        (".csv", "keyword,keyword_term\nbank,{bad}\n", "invalid JSON in CSV field"),
+    ],
+)
+def test_load_reports_malformed_keyword_files(tmp_path, suffix, content, message):
+    if suffix == ".yaml":
+        pytest.importorskip("yaml")
+    path = tmp_path / f"bad{suffix}"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match=message) as exc:
+        KeywordList.load(path)
+    assert str(path) in str(exc.value)
+
+
 def test_load_text_and_csv(tmp_path):
     txt = tmp_path / "kw.txt"
     txt.write_text("# comment\nartificial intelligence | machine intelligence | AI\n\npython\n", encoding="utf-8")
