@@ -297,7 +297,11 @@ class KeywordList:
             if suffix == ".csv":
                 return cls.from_csv(content, **kwargs)
             if suffix in (".yaml", ".yml"):
-                parsed = _yaml().safe_load(content)
+                yaml = _yaml()
+                try:
+                    parsed = yaml.safe_load(content)
+                except yaml.YAMLError as exc:
+                    raise ValueError(f"invalid YAML: {exc}") from exc
                 if parsed is None:
                     return cls(**kwargs)
                 if isinstance(parsed, list):
@@ -306,8 +310,13 @@ class KeywordList:
                     return cls.from_dict(parsed, **kwargs)
                 raise ValueError("YAML must contain a mapping or a list")
             return cls.from_text(content, **kwargs)
-        except (ValueError, TypeError) as exc:
-            raise type(exc)(f"{path}: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            detail = "invalid JSON in CSV field" if suffix == ".csv" else "invalid JSON"
+            raise ValueError(f"{path}: {detail}: {exc}") from exc
+        except TypeError as exc:
+            raise TypeError(f"{path}: {exc}") from exc
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from exc
 
     # ------------------------------------------------------------------ serialisation
     def to_dict(self) -> dict[str, dict[str, Any]]:
