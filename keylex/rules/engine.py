@@ -61,6 +61,8 @@ def _fold(name: str) -> str:
 
 @dataclass(frozen=True)
 class NamedRule:
+    """A rule registered in a :class:`RuleEngine` with its name, weight and description."""
+
     name: str
     rule: Rule
     weight: float = 1.0
@@ -69,6 +71,7 @@ class NamedRule:
     source: str = field(default="", compare=False, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
+        """``{"rule": <rule string>, "weight": ..., "description": ...}`` (defaults omitted)."""
         data: dict[str, Any] = {"rule": self.rule.to_dsl()}
         if self.weight != 1.0:
             data["weight"] = self.weight
@@ -79,7 +82,16 @@ class NamedRule:
 
 @dataclass(frozen=True)
 class EngineResult:
-    """Result of :meth:`RuleEngine.evaluate`."""
+    """Result of :meth:`RuleEngine.evaluate`.
+
+    ``"name" in result`` tells whether a rule fired; ``result["name"]`` is its :class:`RuleResult`.
+
+    Attributes:
+        text: The evaluated text.
+        matches: All keyword matches found in the text.
+        results: ``{rule name: RuleResult}`` for every rule, fired or not.
+        rules: The engine's rules at evaluation time.
+    """
 
     text: str
     matches: list[Match]
@@ -116,6 +128,7 @@ class EngineResult:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-compatible summary: fired rules, score, and per-rule details with their matches."""
         return {
             "fired": self.fired,
             "score": self.score,
@@ -214,11 +227,13 @@ class RuleEngine:
         return self
 
     def remove_rule(self, name: str) -> None:
+        """Remove the rule called ``name``. Raises ``KeyError`` if there is none."""
         del self._rules[name]
         self._combined_sig = None
 
     @property
     def rules(self) -> dict[str, NamedRule]:
+        """``{name: NamedRule}`` (a copy; change rules with :meth:`add_rule` / :meth:`remove_rule`)."""
         return dict(self._rules)
 
     def _needed(self) -> set[str]:
@@ -273,6 +288,7 @@ class RuleEngine:
         return EngineResult(text, matches, results, dict(self._rules))
 
     def evaluate_many(self, texts: Iterable[str]) -> Iterator[EngineResult]:
+        """Lazily :meth:`evaluate` each text."""
         for text in texts:
             yield self.evaluate(text)
 
@@ -281,6 +297,7 @@ class RuleEngine:
         return self.evaluate(text).fired
 
     def score(self, text: str) -> float:
+        """Sum of the weights of the rules that fire on ``text``."""
         return self.evaluate(text).score
 
     # ------------------------------------------------------------------ checks
@@ -350,6 +367,10 @@ class RuleEngine:
 
     # ------------------------------------------------------------------ persistence
     def to_dict(self) -> dict[str, Any]:
+        """``{"rules": ..., "keywords": ..., "options": ...}``, readable by :meth:`from_dict`.
+
+        Only JSON-serialisable matcher options are kept (a callable stemmer is dropped).
+        """
         data: dict[str, Any] = {"rules": {n: r.to_dict() for n, r in self._rules.items()}}
         if len(self.keyword_list):
             data["keywords"] = self.keyword_list.to_list()

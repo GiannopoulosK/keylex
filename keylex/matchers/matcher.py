@@ -202,6 +202,7 @@ class KeywordMatcher(BaseMatcher):
     # legacy attribute
     @property
     def fuzzy_algo(self) -> str | Scorer:
+        """Deprecated alias of :attr:`scorer`."""
         return self.scorer
 
     def compile(self, force: bool = False) -> KeywordMatcher:
@@ -263,6 +264,14 @@ class KeywordMatcher(BaseMatcher):
             return state
 
     def find(self, text: str) -> list[Match]:
+        """Return all keyword matches in ``text``, sorted by position.
+
+        Offsets and :attr:`Match.text` always refer to the original ``text``, whatever
+        normalisation was applied. The index is (re)built first if the keywords or options changed.
+
+        Raises:
+            TypeError: ``text`` is not a ``str``.
+        """
         self._validate_text(text)
         state = self._compiled()
         original = text
@@ -293,14 +302,21 @@ class KeywordMatcher(BaseMatcher):
 
 
 class ExactMatcher(KeywordMatcher):
-    """:class:`KeywordMatcher` with ``match_type="exact"``."""
+    """:class:`KeywordMatcher` with ``match_type="exact"``.
+
+    Accepts the same keyword arguments as :class:`KeywordMatcher`.
+    """
 
     def __init__(self, keywords: KeywordsInput, **kwargs: Any) -> None:
         super().__init__(keywords, "exact", **kwargs)
 
 
 class FuzzyMatcher(KeywordMatcher):
-    """:class:`KeywordMatcher` with ``match_type="fuzzy"`` (exact + typo-tolerant)."""
+    """:class:`KeywordMatcher` with ``match_type="fuzzy"`` (exact + typo-tolerant).
+
+    Accepts the same keyword arguments as :class:`KeywordMatcher`; ``threshold`` (0-100, default
+    85) is the minimum similarity for a fuzzy match.
+    """
 
     def __init__(self, keywords: KeywordsInput, threshold: float = 85, **kwargs: Any) -> None:
         super().__init__(keywords, "fuzzy", threshold, **kwargs)

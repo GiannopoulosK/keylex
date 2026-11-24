@@ -89,7 +89,14 @@ _PARTICLES = frozenset({"de", "la", "le", "du", "des", "von", "van", "der", "den
 
 @dataclass(frozen=True)
 class ExtractedKeyword:
-    """A keyword found by an extractor. Higher ``score`` is better (normalised to ``(0, 1]``)."""
+    """A keyword found by an extractor.
+
+    Attributes:
+        phrase: The keyword as it appears in the text (most frequent spelling).
+        score: Relevance normalised to ``(0, 1]``; the best keyword scores ``1.0``.
+        count: Number of occurrences in the text.
+        positions: Character offsets where the occurrences start.
+    """
 
     phrase: str
     score: float
@@ -97,14 +104,18 @@ class ExtractedKeyword:
     positions: tuple[int, ...] = field(default=(), repr=False, compare=False)
 
     def to_keyword(self, **kwargs: object) -> Keyword:
+        """A :class:`~keylex.Keyword` for :attr:`phrase`; ``kwargs`` go to the ``Keyword`` constructor."""
         return Keyword(self.phrase, **kwargs)  # type: ignore[arg-type]
 
     def to_dict(self) -> dict[str, object]:
+        """``{"phrase", "score", "count"}`` (``score`` rounded to 4 places)."""
         return {"phrase": self.phrase, "score": round(self.score, 4), "count": self.count}
 
 
 @dataclass(frozen=True)
 class Word:
+    """A token of a :class:`PreparedText`, with the flags extractors use to form candidate phrases."""
+
     surface: str
     lower: str
     start: int
@@ -128,10 +139,12 @@ class Word:
 
     @property
     def capitalised(self) -> bool:
+        """``True`` if the word starts with an upper-case letter."""
         return self.surface[:1].isupper()
 
     @property
     def bad_end(self) -> bool:
+        """``True`` if a keyphrase must not end with this word (stopword, number, verb-like, ...)."""
         return (
             self.is_stop
             or self.is_number
@@ -576,6 +589,7 @@ class BaseExtractor(ABC):
         return [(t.idx, t.idx + len(t.text), t.pos_) for t in doc]
 
     def prepare(self, text: str) -> PreparedText:
+        """Tokenise ``text`` with this extractor's settings (stopwords, language, POS filter)."""
         return PreparedText(
             text, self.stopwords, self.min_word_length, language=self.language, pos_tags=self._pos_tags(text)
         )
@@ -686,6 +700,7 @@ class BaseExtractor(ABC):
         return [pool[i] for i in selected]
 
     def extract_many(self, texts: Iterable[str], top_n: int | None = None) -> Iterator[list[ExtractedKeyword]]:
+        """Lazily :meth:`extract` the keywords of each text."""
         for text in texts:
             yield self.extract(text, top_n)
 

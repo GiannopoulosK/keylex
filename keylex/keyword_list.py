@@ -224,6 +224,10 @@ class KeywordList:
 
     @classmethod
     def from_json(cls, data: str, **kwargs: Any) -> KeywordList:
+        """Parse a JSON string: a list of keywords, or any dict accepted by :meth:`from_dict`.
+
+        Reads the output of :meth:`to_json`.
+        """
         parsed = json.loads(data)
         if isinstance(parsed, list):
             return cls(parsed, **kwargs)
@@ -440,6 +444,7 @@ class KeywordList:
         return self.add(keyword, **kwargs)
 
     def extend(self, keywords: Iterable[KeywordLike]) -> None:
+        """Add several keywords, applying the list's ``on_duplicate`` policy to each."""
         for kw in keywords:
             self.add(kw)
 
@@ -452,7 +457,7 @@ class KeywordList:
         return self._items.pop(name)
 
     def discard(self, keyword: Keyword | str) -> None:
-        """Remove if present; never raises."""
+        """Remove a keyword by name (or by a keyword with that name) if present; never raises."""
         name = keyword.name if isinstance(keyword, Keyword) else keyword
         if self._items.pop(name, None) is not None:
             self._touch()
@@ -474,6 +479,7 @@ class KeywordList:
         return renamed
 
     def clear(self) -> None:
+        """Remove all keywords."""
         self._items.clear()
         self._touch()
 
@@ -484,7 +490,7 @@ class KeywordList:
         return self
 
     def copy(self) -> KeywordList:
-        """Deep copy."""
+        """Deep copy: the new list holds copies of the keywords, not the same objects."""
         return KeywordList([kw.copy() for kw in self], on_duplicate=self.on_duplicate)
 
     # ------------------------------------------------------------------ queries
@@ -495,6 +501,7 @@ class KeywordList:
 
     @property
     def names(self) -> list[str]:
+        """Canonical keyword names, in insertion order."""
         return list(self._items)
 
     def get(self, name: str, default: Keyword | None = None) -> Keyword | None:
@@ -509,9 +516,14 @@ class KeywordList:
         return default
 
     def get_keyword(self, keyword_str: str) -> Keyword | None:
+        """Legacy alias of :meth:`get`."""
         return self.get(keyword_str)
 
     def get_index(self, keyword_name: str, raise_error: bool = False) -> int | None:
+        """Position of the keyword named ``keyword_name`` (exact name).
+
+        Returns ``None`` if it is missing, or raises ``ValueError`` when ``raise_error`` is true.
+        """
         for index, name in enumerate(self._items):
             if name == keyword_name:
                 return index
@@ -520,9 +532,11 @@ class KeywordList:
         return None
 
     def get_all_keywords(self) -> list[str]:
+        """Legacy alias of :attr:`names`."""
         return self.names
 
     def get_keywords_and_related_terms(self) -> dict[str, list[str]]:
+        """``{name: related terms}`` (synonyms, acronyms and variants) for every keyword."""
         return {kw.name: kw.related_terms for kw in self}
 
     def find_term(self, text: str) -> list[Keyword]:
@@ -547,7 +561,7 @@ class KeywordList:
         return {form: names for form, names in owners.items() if len(names) > 1}
 
     def categories(self) -> dict[str | None, list[Keyword]]:
-        """Group keywords by category."""
+        """Group keywords by category: ``{category: [keywords]}`` (``None`` for uncategorised)."""
         groups: dict[str | None, list[Keyword]] = {}
         for kw in self:
             groups.setdefault(kw.category, []).append(kw)

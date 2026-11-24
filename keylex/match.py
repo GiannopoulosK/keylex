@@ -43,22 +43,27 @@ class Match:
 
     @property
     def span(self) -> tuple[int, int]:
+        """``(start, end)`` character offsets into the original text."""
         return (self.start, self.end)
 
     def __len__(self) -> int:
         return self.end - self.start
 
     def overlaps(self, other: Match) -> bool:
+        """``True`` if this match shares at least one character with ``other``."""
         return self.start < other.end and other.start < self.end
 
     @property
     def weight(self) -> float:
+        """The matched keyword's :attr:`~keylex.Keyword.weight` (``1.0`` if unknown)."""
         return self.keyword_obj.weight if self.keyword_obj is not None else 1.0
 
     def sort_key(self) -> tuple[int, int, str]:
+        """Position order: by start, longer first, then keyword name (``sorted(ms, key=Match.sort_key)``)."""
         return (self.start, -self.end, self.keyword)
 
     def to_dict(self) -> dict[str, Any]:
+        """JSON-compatible dict of the match (without ``keyword_obj``); ``score`` is rounded to 2 places."""
         return {
             "keyword": self.keyword,
             "start": self.start,

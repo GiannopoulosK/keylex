@@ -110,9 +110,14 @@ class Term:
 
     @property
     def is_acronym_like(self) -> bool:
+        """``True`` for acronyms and short all-caps terms (``"NASA"``, ``"G7"``).
+
+        Such terms are case-sensitive and never fuzzy-matched unless configured otherwise.
+        """
         return self.kind == "acronym" or (self.kind != "pattern" and looks_like_acronym(self.text))
 
     def to_dict(self) -> dict[str, Any]:
+        """Serialise to a JSON-compatible dict; options left at their default are omitted."""
         data: dict[str, Any] = {"text": self.text, "kind": self.kind}
         if self.case_sensitive is not None:
             data["case_sensitive"] = self.case_sensitive
@@ -124,6 +129,7 @@ class Term:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Term:
+        """Build a term from :meth:`to_dict` output (unknown keys are ignored)."""
         return cls(**{k: data[k] for k in ("text", "kind", "case_sensitive", "fuzzy", "whole_word") if k in data})
 
 
@@ -206,7 +212,10 @@ class Keyword:
     # ------------------------------------------------------------------ identity
     @property
     def name(self) -> str:
-        """The canonical keyword."""
+        """The canonical keyword name, reported as :attr:`Match.keyword` on every match.
+
+        Read-only; use :meth:`KeywordList.rename` or :meth:`renamed` to change it.
+        """
         return self._name
 
     @property
@@ -232,6 +241,11 @@ class Keyword:
         return list(self._terms.values())
 
     def iter_terms(self, *kinds: str) -> Iterator[Term]:
+        """Iterate over the keyword's terms, optionally only those of the given ``kinds``.
+
+        Example: ``kw.iter_terms("synonym", "acronym")``. Iterates over a snapshot, so adding
+        terms while iterating is safe.
+        """
         for term in list(self._terms.values()):  # snapshot: safe if terms are added meanwhile
             if not kinds or term.kind in kinds:
                 yield term
@@ -256,6 +270,10 @@ class Keyword:
             self._touch()
 
     def remove_terms(self, kind: TermKind, *items: str | Iterable[str] | None) -> None:
+        """Remove terms of the given kind (case-insensitive; patterns by exact text).
+
+        Terms that are not present are ignored.
+        """
         changed = False
         for item in _flatten(items):
             text = item.text if isinstance(item, Term) else item
@@ -268,6 +286,7 @@ class Keyword:
             self._touch()
 
     def clear_terms(self, *kinds: str) -> None:
+        """Remove every term of the given ``kinds``; with no arguments, all terms except the keyword."""
         kinds = kinds or (*_RELATED_KINDS, "pattern")
         before = len(self._terms)
         self._terms = {k: t for k, t in self._terms.items() if t.kind == "keyword" or t.kind not in kinds}
@@ -277,6 +296,7 @@ class Keyword:
     # --- synonyms
     @property
     def synonyms(self) -> list[str]:
+        """Alternative names (a copy). Assigning a string or list replaces them all."""
         return self._texts("synonym")
 
     @synonyms.setter
@@ -288,22 +308,30 @@ class Keyword:
         self.add_terms("synonym", *synonyms)
 
     def remove_synonyms(self, *synonyms: str | Iterable[str] | None) -> None:
+        """Remove synonyms (case-insensitive); missing ones are ignored."""
         self.remove_terms("synonym", *synonyms)
 
     def set_synonyms(self, *synonyms: str | Iterable[str] | None) -> None:
+        """Replace all synonyms with the given ones."""
         self.clear_terms("synonym")
         self.add_synonyms(*synonyms)
 
     def clear_synonyms(self) -> None:
+        """Remove all synonyms."""
         self.clear_terms("synonym")
 
     @property
     def has_synonyms(self) -> bool:
+        """``True`` if the keyword has at least one synonym."""
         return any(t.kind == "synonym" for t in self._terms.values())
 
     # --- acronyms
     @property
     def acronyms(self) -> list[str]:
+        """Abbreviations such as ``"AI"`` (a copy). Assigning a string or list replaces them all.
+
+        Acronyms are case-sensitive unless configured otherwise, and ``"US"`` also matches ``"U.S."``.
+        """
         return self._texts("acronym")
 
     @acronyms.setter
@@ -311,25 +339,31 @@ class Keyword:
         self.set_acronyms(acronyms)
 
     def add_acronyms(self, *acronyms: str | Iterable[str] | None) -> None:
+        """Add acronyms: ``add_acronyms("AI", "A.I.")`` or ``add_acronyms(["AI"])``."""
         self.add_terms("acronym", *acronyms)
 
     def remove_acronyms(self, *acronyms: str | Iterable[str] | None) -> None:
+        """Remove acronyms (case-insensitive); missing ones are ignored."""
         self.remove_terms("acronym", *acronyms)
 
     def set_acronyms(self, *acronyms: str | Iterable[str] | None) -> None:
+        """Replace all acronyms with the given ones."""
         self.clear_terms("acronym")
         self.add_acronyms(*acronyms)
 
     def clear_acronyms(self) -> None:
+        """Remove all acronyms."""
         self.clear_terms("acronym")
 
     @property
     def has_acronyms(self) -> bool:
+        """``True`` if the keyword has at least one acronym."""
         return any(t.kind == "acronym" for t in self._terms.values())
 
     # --- variants (inflections, spellings, ...)
     @property
     def variants(self) -> list[str]:
+        """Spellings and inflections such as ``"colour"`` (a copy). Assigning replaces them all."""
         return self._texts("variant")
 
     @variants.setter
@@ -338,14 +372,17 @@ class Keyword:
         self.add_variants(variants)
 
     def add_variants(self, *variants: str | Iterable[str] | None) -> None:
+        """Add spelling variants: ``add_variants("colour", "colours")`` or a list."""
         self.add_terms("variant", *variants)
 
     def remove_variants(self, *variants: str | Iterable[str] | None) -> None:
+        """Remove variants (case-insensitive); missing ones are ignored."""
         self.remove_terms("variant", *variants)
 
     # --- regex patterns
     @property
     def patterns(self) -> list[str]:
+        """Regular expressions that also count as this keyword (a copy). Assigning replaces them all."""
         return self._texts("pattern")
 
     @patterns.setter
@@ -354,9 +391,15 @@ class Keyword:
         self.add_patterns(patterns)
 
     def add_patterns(self, *patterns: str | Iterable[str] | None) -> None:
+        """Add regular expressions, e.g. ``add_patterns(r"GPT-\\d+")``.
+
+        Raises:
+            ValueError: a pattern is not a valid regular expression.
+        """
         self.add_terms("pattern", *patterns)
 
     def remove_patterns(self, *patterns: str | Iterable[str] | None) -> None:
+        """Remove patterns (exact text match); missing ones are ignored."""
         self.remove_terms("pattern", *patterns)
 
     # --- related terms (synonyms + acronyms + variants)
@@ -376,6 +419,7 @@ class Keyword:
         acronyms: str | Iterable[str] | None = None,
         variants: str | Iterable[str] | None = None,
     ) -> None:
+        """Add synonyms, acronyms and variants in one call."""
         self.add_synonyms(synonyms)
         self.add_acronyms(acronyms)
         self.add_variants(variants)
@@ -386,14 +430,17 @@ class Keyword:
         acronyms: str | Iterable[str] | None = None,
         variants: str | Iterable[str] | None = None,
     ) -> None:
+        """Remove synonyms, acronyms and variants in one call; missing ones are ignored."""
         self.remove_synonyms(synonyms)
         self.remove_acronyms(acronyms)
         self.remove_variants(variants)
 
     def clear_related_terms(self) -> None:
+        """Remove all synonyms, acronyms and variants (patterns are kept)."""
         self.clear_terms(*_RELATED_KINDS)
 
     def has_related_terms(self) -> bool:
+        """``True`` if the keyword has any synonym, acronym or variant."""
         return any(t.kind in _RELATED_KINDS for t in self._terms.values())
 
     # ------------------------------------------------------------------ matching options
@@ -403,6 +450,11 @@ class Keyword:
 
     @property
     def case_sensitive(self) -> bool | None:
+        """Default case sensitivity for this keyword's terms; ``None`` inherits from the matcher.
+
+        Precedence: a term's own setting, then this, then the acronym rule (all-caps terms are
+        case-sensitive), then the matcher's ``case_sensitive``.
+        """
         return self._case_sensitive
 
     @case_sensitive.setter
@@ -412,6 +464,11 @@ class Keyword:
 
     @property
     def fuzzy(self) -> bool | None:
+        """Whether fuzzy matching may be used for this keyword; ``None`` uses the default.
+
+        Only applies when the matcher uses ``match_type="fuzzy"``. Acronyms, patterns and terms
+        shorter than ``min_fuzzy_length`` are never fuzzy-matched unless a term sets ``fuzzy``.
+        """
         return self._fuzzy
 
     @fuzzy.setter
@@ -421,6 +478,10 @@ class Keyword:
 
     @property
     def exclude(self) -> list[str]:
+        """Context phrases that veto a match when found within :attr:`context_window` words of it.
+
+        Example: ``Keyword("Apple", exclude=["fruit", "pie"])``. Assigning replaces the list.
+        """
         return list(self._exclude)
 
     @exclude.setter
@@ -430,6 +491,10 @@ class Keyword:
 
     @property
     def require(self) -> list[str]:
+        """Context phrases of which at least one must appear within :attr:`context_window` words.
+
+        An empty list means no requirement. Assigning replaces the list.
+        """
         return list(self._require)
 
     @require.setter
@@ -439,6 +504,7 @@ class Keyword:
 
     @property
     def context_window(self) -> int:
+        """Words inspected on each side of a match for :attr:`exclude` / :attr:`require` (default 10)."""
         return self._context_window
 
     @context_window.setter
@@ -450,6 +516,7 @@ class Keyword:
 
     @property
     def category(self) -> str | None:
+        """Optional category, reported as :attr:`Match.category` and usable via ``CATEGORY(...)`` rules."""
         return self._category
 
     @category.setter
@@ -459,6 +526,7 @@ class Keyword:
 
     @property
     def tags(self) -> list[str]:
+        """Free-form labels (a copy), usable via ``TAG(...)`` rules. Assigning replaces them all."""
         return list(self._tags)
 
     @tags.setter
@@ -468,6 +536,7 @@ class Keyword:
 
     @property
     def weight(self) -> float:
+        """Importance of the keyword (default ``1.0``), summed by ``output="score"``."""
         return self._weight
 
     @weight.setter
@@ -479,7 +548,7 @@ class Keyword:
 
     # ------------------------------------------------------------------ utilities
     def copy(self) -> Keyword:
-        """Return an independent deep copy."""
+        """Return an independent deep copy (changes to it never affect this keyword)."""
         return Keyword.from_dict(self.to_dict())
 
     def to_dict(self) -> dict[str, Any]:

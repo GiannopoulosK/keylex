@@ -58,10 +58,12 @@ class Token:
 
     @property
     def is_word(self) -> bool:
+        """``True`` for word tokens (letters / digits), ``False`` for punctuation."""
         return bool(_WORD_RE.fullmatch(self.text))
 
     @property
     def is_dash(self) -> bool:
+        """``True`` if the token is a hyphen or dash character."""
         return self.text in DASHES
 
 

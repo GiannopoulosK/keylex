@@ -86,6 +86,7 @@ class BaseMatcher(ABC):
         return (self.format_output(self.find(text), fmt) for text in texts)
 
     def format_output(self, matches: list[Match], output: str | OutputFormat) -> Any:
+        """Convert ``matches`` (e.g. from :meth:`find`) to an ``output`` format (see :meth:`match`)."""
         fmt = self._validate_output_format(output)
         if fmt == "matches":
             return matches

@@ -89,7 +89,10 @@ class YakeExtractor(BaseExtractor):
 
 class RakeExtractor(BaseExtractor):
     """RAKE (Rose et al., 2010): phrases are runs of non-stopwords; words are scored by
-    degree / frequency. Favours longer, specific phrases."""
+    degree / frequency. Favours longer, specific phrases.
+
+    Takes the :class:`BaseExtractor` arguments; ``max_ngram`` defaults to 4 here.
+    """
 
     name = "rake"
 
@@ -160,6 +163,7 @@ class TextRankExtractor(BaseExtractor):
     Args:
         window: Co-occurrence window (in content words).
         damping: PageRank damping factor.
+        iterations: Maximum number of PageRank iterations (stops earlier once converged).
     """
 
     name = "textrank"
@@ -216,6 +220,9 @@ class TfidfExtractor(BaseExtractor):
     that are common across the corpus then drop in the ranking. Without fitting, the sentences of
     the input text serve as pseudo-documents. Term frequency is sublinear (``1 + log(count)``),
     multi-word phrases get a small length bonus, and ties are broken by first occurrence.
+
+    Args:
+        corpus: Optional documents to :meth:`fit` on right away.
     """
 
     name = "tfidf"
@@ -251,6 +258,7 @@ class TfidfExtractor(BaseExtractor):
 
     @property
     def is_fitted(self) -> bool:
+        """``True`` once :meth:`fit` has learned document frequencies from a corpus."""
         return self.n_docs > 0
 
     def _score(self, prepared: PreparedText) -> tuple[dict[tuple[str, ...], float], _Collector]:

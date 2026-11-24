@@ -247,11 +247,20 @@ def _overlaps(a: Span, b: Span) -> bool:
 class KeylexComponent:
     """spaCy pipeline component that stores keylex matches on each ``Doc``.
 
+    Usually created with ``nlp.add_pipe("keylex", config={...})`` or :func:`add_to_pipeline`.
+
     Args:
+        nlp: The pipeline the component belongs to.
+        name: The component's name in the pipeline.
+        matcher: The :class:`KeywordMatcher` run on each ``doc.text``.
+        spans_key: ``doc.spans`` key the matches are stored under (``""`` to skip).
         set_ents: Also add the matches to ``doc.ents``.
         overwrite_ents: With ``set_ents``, ``False`` (default) keeps existing entities (e.g. from
             NER) and only adds keylex spans that don't overlap them; ``True`` lets keylex spans
             replace overlapping entities.
+        label: Span label: ``"category"`` (falling back to ``default_label``), ``"keyword"`` or
+            ``"fixed"`` (always ``default_label``).
+        default_label: Label used by ``"fixed"`` and for keywords without a category.
         alignment_mode: See :func:`match_spans` (default ``"strict"``).
         matcher_options: Extra :class:`KeywordMatcher` keyword arguments (``case_sensitive``, ...).
     """
@@ -305,12 +314,14 @@ class KeylexComponent:
         return doc
 
     def pipe(self, docs: Iterable[Doc], batch_size: int = 128) -> Iterable[Doc]:
+        """Process a stream of docs (called by ``nlp.pipe``)."""
         for doc in docs:
             yield self(doc)
 
     # -- keywords and serialisation ------------------------------------------------------------------
     @property
     def keyword_list(self) -> KeywordList:
+        """The keywords the component matches."""
         return self.matcher.keyword_list
 
     def set_keywords(self, keywords: KeywordsInput, stemmer: str | Callable[[str], str] | None = None) -> None:
@@ -343,18 +354,22 @@ class KeylexComponent:
         self.matcher = KeywordMatcher(KeywordList.from_list(state.get("keywords", [])), **self.matcher_options)
 
     def to_bytes(self, *, exclude: Sequence[str] = ()) -> bytes:
+        """Serialise keywords and options (used by ``nlp.to_bytes``)."""
         return json.dumps(self._state(), ensure_ascii=False).encode("utf-8")
 
     def from_bytes(self, data: bytes, *, exclude: Sequence[str] = ()) -> KeylexComponent:
+        """Restore keywords and options from :meth:`to_bytes` output (used by ``nlp.from_bytes``)."""
         self._load_state(json.loads(data.decode("utf-8")))
         return self
 
     def to_disk(self, path: str | Path, *, exclude: Sequence[str] = ()) -> None:
+        """Save keywords and options to ``path/keylex.json`` (used by ``nlp.to_disk``)."""
         path = Path(path)
         path.mkdir(parents=True, exist_ok=True)
         (path / "keylex.json").write_text(json.dumps(self._state(), ensure_ascii=False, indent=1), encoding="utf-8")
 
     def from_disk(self, path: str | Path, *, exclude: Sequence[str] = ()) -> KeylexComponent:
+        """Load keywords and options saved by :meth:`to_disk` (used by ``spacy.load``)."""
         file = Path(path) / "keylex.json"
         if file.exists():
             self._load_state(json.loads(file.read_text(encoding="utf-8")))

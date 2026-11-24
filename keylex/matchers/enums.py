@@ -1,3 +1,5 @@
+"""String enums for matcher options; every option also accepts the plain string value."""
+
 from __future__ import annotations
 
 from enum import Enum
@@ -36,6 +38,8 @@ class OutputFormat(_ValuesEnum):
 
 
 class MatchType(_ValuesEnum):
+    """How :class:`KeywordMatcher` searches: exact only, or exact plus typo-tolerant."""
+
     EXACT = "exact"
     FUZZY = "fuzzy"  #: exact + windowed fuzzy matching
 

@@ -181,12 +181,15 @@ class Document:
         return len(self._info.unit_starts(unit))
 
     def unit_of(self, m: Match, unit: str) -> int:
+        """Index of the sentence (``unit="sentence"``) or paragraph that a match starts in."""
         return bisect_right(self._info.unit_starts(unit), m.start) - 1
 
     def sentence_of(self, m: Match) -> int:
+        """Index of the sentence that a match starts in."""
         return self.unit_of(m, "sentence")
 
     def paragraph_of(self, m: Match) -> int:
+        """Index of the paragraph that a match starts in."""
         return self.unit_of(m, "paragraph")
 
 
@@ -210,6 +213,7 @@ class RuleResult:
 
     @property
     def occurrences(self) -> int:
+        """How many times the rule occurs (what ``ATLEAST`` counts); ``0`` when it did not match."""
         if self.count is not None:
             return self.count
         if not self.matched:
@@ -218,6 +222,7 @@ class RuleResult:
 
     @property
     def keywords(self) -> list[str]:
+        """Unique names of the keywords behind :attr:`matches`, in order of appearance."""
         return list(dict.fromkeys(m.keyword for m in self.matches))
 
     def explain(self, indent: int = 0, *, full_label: bool = True) -> str:
@@ -297,7 +302,8 @@ class Rule(ABC):
     """
 
     @abstractmethod
-    def evaluate(self, doc: Document) -> RuleResult: ...
+    def evaluate(self, doc: Document) -> RuleResult:
+        """Evaluate the rule on ``doc``. Call ``doc.evaluate(rule)`` instead to use the cache."""
 
     @abstractmethod
     def to_dsl(self) -> str:
@@ -319,6 +325,7 @@ class Rule(ABC):
         return names
 
     def children(self) -> Sequence[Rule]:
+        """Direct sub-rules (empty for leaf rules such as keywords)."""
         return ()
 
     def label(self) -> str:
@@ -330,6 +337,7 @@ class Rule(ABC):
         return Document(text, matcher.find(text)).evaluate(self)  # type: ignore[attr-defined]
 
     def at_least(self, n: int) -> AtLeast:
+        """This rule occurring at least ``n`` times: ``kw("bank").at_least(3)``."""
         return AtLeast(self, n)
 
     def __and__(self, other: Rule | str) -> AllOf:
@@ -847,45 +855,73 @@ def kw(*names: str) -> Rule:
 
 
 def category(name: str) -> CategoryRule:
+    """Any keyword of category ``name`` occurs (case-insensitive). DSL: ``CATEGORY(name)``."""
     return CategoryRule(name)
 
 
 def tag(name: str) -> TagRule:
+    """Any keyword tagged ``name`` occurs (case-insensitive). DSL: ``TAG(name)``."""
     return TagRule(name)
 
 
 def any_of(*rules: Rule | str, min_count: int = 1) -> AnyOf:
+    """At least ``min_count`` of ``rules`` match (default 1: OR). DSL: ``ANY(n, a, b, ...)``.
+
+    With ``min_count > 1`` operands must be satisfied by different matches, so
+    ``any_of("ML", "machine learning", min_count=2)`` does not fire on a single "ML".
+    Strings are keyword names.
+    """
     return AnyOf(*rules, min_count=min_count)
 
 
 def all_of(*rules: Rule | str) -> AllOf:
+    """All of ``rules`` match (AND). DSL: ``ALL(a, b, ...)`` or ``a AND b``. Strings are keyword names."""
     return AllOf(*rules)
 
 
 def none_of(*rules: Rule | str) -> Not:
+    """None of ``rules`` occurs anywhere in the text. DSL: ``NONE(a, b, ...)``."""
     return Not(AnyOf(*rules))
 
 
 def not_(rule: Rule | str) -> Not:
+    """``rule`` does not match (same as ``~rule``). DSL: ``NOT rule``."""
     return Not(rule)
 
 
 def at_least(n: int, rule: Rule | str) -> AtLeast:
+    """``rule`` occurs at least ``n`` times. DSL: ``ATLEAST(n, rule)``.
+
+    See the module docs for what counts as an occurrence of each kind of rule.
+    """
     return AtLeast(rule, n)
 
 
 def near(a: Rule | str, b: Rule | str, within: int = 5, ordered: bool = False) -> Near:
+    """``a`` and ``b`` occur with at most ``within`` words between them. DSL: ``NEAR(a, b, within)``.
+
+    Args:
+        a: A rule or keyword name.
+        b: A rule or keyword name.
+        within: Maximum number of words between the two matches.
+        ordered: Require ``a`` before ``b`` (the same as :func:`before`).
+    """
     return Near(a, b, within, ordered)
 
 
 def before(a: Rule | str, b: Rule | str, within: int = 5) -> Near:
-    """``a`` occurs before ``b`` with at most ``within`` words in between."""
+    """``a`` occurs before ``b`` with at most ``within`` words in between. DSL: ``BEFORE(a, b, within)``."""
     return Near(a, b, within, ordered=True)
 
 
 def same_sentence(*rules: Rule | str) -> SameSentence:
+    """All ``rules`` match inside one sentence. DSL: ``SENTENCE(a, b, ...)``.
+
+    A ``not_(x)`` operand means ``x`` is absent from that sentence.
+    """
     return SameSentence(*rules)
 
 
 def same_paragraph(*rules: Rule | str) -> SameParagraph:
+    """All ``rules`` match inside one paragraph (blocks separated by blank lines). DSL: ``PARAGRAPH(a, b, ...)``."""
     return SameParagraph(*rules)
