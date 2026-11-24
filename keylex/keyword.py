@@ -214,21 +214,10 @@ class Keyword:
     def name(self) -> str:
         """The canonical keyword name, reported as :attr:`Match.keyword` on every match.
 
-        Read-only; use :meth:`KeywordList.rename` or :meth:`renamed` to change it.
+        Read-only, so that :class:`KeywordList` indexes stay consistent; use
+        :meth:`KeywordList.rename` or :meth:`renamed` to change it.
         """
         return self._name
-
-    @property
-    def keyword(self) -> str:
-        """Alias of :attr:`name` (read-only; use ``KeywordList.rename`` to rename)."""
-        return self._name
-
-    @keyword.setter
-    def keyword(self, value: str) -> None:
-        raise AttributeError(
-            "Keyword names are read-only so that KeywordList indexes stay consistent. "
-            "Use KeywordList.rename(old, new) or Keyword.renamed(new)."
-        )
 
     def renamed(self, new_name: str) -> Keyword:
         """Return a copy of this keyword with a different canonical name."""
@@ -439,6 +428,7 @@ class Keyword:
         """Remove all synonyms, acronyms and variants (patterns are kept)."""
         self.clear_terms(*_RELATED_KINDS)
 
+    @property
     def has_related_terms(self) -> bool:
         """``True`` if the keyword has any synonym, acronym or variant."""
         return any(t.kind in _RELATED_KINDS for t in self._terms.values())

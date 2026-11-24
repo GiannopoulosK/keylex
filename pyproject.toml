@@ -16,7 +16,7 @@ requires-python = ">=3.10"
 dependencies = ["rapidfuzz>=3.0,<4"]
 keywords = ["keyword matching", "keyword extraction", "nlp", "fuzzy matching", "text classification", "rules", "spacy"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",

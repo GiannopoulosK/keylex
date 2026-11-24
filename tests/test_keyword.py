@@ -7,10 +7,10 @@ from keylex import Keyword, KeywordList, Term
 
 def test_construction_and_terms():
     kw = Keyword("artificial intelligence", "machine intelligence", ["AI"], variants="A.I.", category="tech")
-    assert kw.name == kw.keyword == "artificial intelligence"
+    assert kw.name == "artificial intelligence"
     assert [t.kind for t in kw.terms] == ["keyword", "synonym", "acronym", "variant"]
     assert kw.related_terms == ["machine intelligence", "AI", "A.I."]
-    assert kw.has_synonyms and kw.has_acronyms and kw.has_related_terms()
+    assert kw.has_synonyms and kw.has_acronyms and kw.has_related_terms
     assert "ai" in kw and "Machine  Intelligence" in kw and "robot" not in kw
 
 
@@ -41,7 +41,7 @@ def test_related_terms_management():
     kw.related_terms = {"synonyms": ["q"]}
     assert kw.related_terms == ["q"]
     kw.clear_related_terms()
-    assert not kw.has_related_terms()
+    assert not kw.has_related_terms
 
 
 def test_patterns_validated():

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-import warnings
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -19,7 +18,7 @@ from .enums import MatchType, Overlaps
 from .exact import ExactEngine
 from .fuzzy import FuzzyEngine, Scorer, resolve_scorer
 
-__all__ = ["BaseMatcher", "ExactMatcher", "FuzzyMatcher", "KeywordMatcher", "Matcher"]
+__all__ = ["BaseMatcher", "ExactMatcher", "FuzzyMatcher", "KeywordMatcher"]
 
 KeywordsInput = KeywordList | Iterable[Keyword | str | Mapping[str, Any]] | Mapping[str, Any] | str
 
@@ -67,7 +66,6 @@ class KeywordMatcher(BaseMatcher):
             its keywords are picked up automatically.
         match_type: ``"exact"`` (default) or ``"fuzzy"`` (exact + typo-tolerant windowed matching).
         threshold: Minimum fuzzy similarity (0-100).
-        fuzzy_algo: Deprecated alias of ``scorer``.
         scorer: RapidFuzz scorer name (``"ratio"``, ``"partial_ratio"``, ``"token_sort_ratio"``,
             ``"token_set_ratio"``, ``"WRatio"``, ``"QRatio"``) or a callable.
         min_fuzzy_length: Terms shorter than this are never fuzzy-matched.
@@ -106,7 +104,6 @@ class KeywordMatcher(BaseMatcher):
         keywords: KeywordsInput,
         match_type: str | MatchType = "exact",
         threshold: float = 85,
-        fuzzy_algo: str | None = None,
         *,
         scorer: str | Scorer = "ratio",
         min_fuzzy_length: int = 4,
@@ -119,9 +116,6 @@ class KeywordMatcher(BaseMatcher):
         context_scope: str = "sentence",
     ) -> None:
         self.keyword_list = as_keyword_list(keywords)
-        if fuzzy_algo is not None:
-            warnings.warn("`fuzzy_algo` is deprecated; use `scorer=`", DeprecationWarning, stacklevel=2)
-            scorer = fuzzy_algo
         self.match_type: str = match_type
         self.threshold: float = threshold
         self.scorer: str | Scorer = scorer
@@ -198,12 +192,6 @@ class KeywordMatcher(BaseMatcher):
         self.__dict__.update(state)
         self._lock = threading.Lock()
         self._mutations_seen = -1
-
-    # legacy attribute
-    @property
-    def fuzzy_algo(self) -> str | Scorer:
-        """Deprecated alias of :attr:`scorer`."""
-        return self.scorer
 
     def compile(self, force: bool = False) -> KeywordMatcher:
         """(Re)build the index. Called automatically when the keywords or the options change.
@@ -320,7 +308,3 @@ class FuzzyMatcher(KeywordMatcher):
 
     def __init__(self, keywords: KeywordsInput, threshold: float = 85, **kwargs: Any) -> None:
         super().__init__(keywords, "fuzzy", threshold, **kwargs)
-
-
-#: Backwards-compatible name of the old intermediate base class.
-Matcher = BaseMatcher

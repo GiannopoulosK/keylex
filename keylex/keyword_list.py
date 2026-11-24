@@ -439,10 +439,6 @@ class KeywordList:
         self._touch()
         return self._items[kw.name]
 
-    def add_keyword(self, keyword: KeywordLike, **kwargs: Any) -> Keyword:
-        """Alias of :meth:`add`."""
-        return self.add(keyword, **kwargs)
-
     def extend(self, keywords: Iterable[KeywordLike]) -> None:
         """Add several keywords, applying the list's ``on_duplicate`` policy to each."""
         for kw in keywords:
@@ -461,10 +457,6 @@ class KeywordList:
         name = keyword.name if isinstance(keyword, Keyword) else keyword
         if self._items.pop(name, None) is not None:
             self._touch()
-
-    def remove_keyword(self, keyword: Keyword | str) -> None:
-        """Remove if present (legacy alias of :meth:`discard`)."""
-        self.discard(keyword)
 
     def rename(self, old: str, new: str) -> Keyword:
         """Rename a keyword in place, keeping its position and all of its terms."""
@@ -514,30 +506,6 @@ class KeywordList:
             if key.casefold() == folded:
                 return value
         return default
-
-    def get_keyword(self, keyword_str: str) -> Keyword | None:
-        """Legacy alias of :meth:`get`."""
-        return self.get(keyword_str)
-
-    def get_index(self, keyword_name: str, raise_error: bool = False) -> int | None:
-        """Position of the keyword named ``keyword_name`` (exact name).
-
-        Returns ``None`` if it is missing, or raises ``ValueError`` when ``raise_error`` is true.
-        """
-        for index, name in enumerate(self._items):
-            if name == keyword_name:
-                return index
-        if raise_error:
-            raise ValueError(f"Keyword {keyword_name!r} not found.")
-        return None
-
-    def get_all_keywords(self) -> list[str]:
-        """Legacy alias of :attr:`names`."""
-        return self.names
-
-    def get_keywords_and_related_terms(self) -> dict[str, list[str]]:
-        """``{name: related terms}`` (synonyms, acronyms and variants) for every keyword."""
-        return {kw.name: kw.related_terms for kw in self}
 
     def find_term(self, text: str) -> list[Keyword]:
         """Keywords that have ``text`` as their name or one of their terms (case-insensitive)."""

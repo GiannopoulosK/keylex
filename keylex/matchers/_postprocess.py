@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort
+from collections.abc import Iterator
 
 from ..match import KIND_PRIORITY, Match
 from ..text import Token, TokenNormalizer, sentence_spans, word_tokens
@@ -26,7 +27,7 @@ class IntervalSet:
     def add(self, start: int, end: int) -> None:
         insort(self._items, (start, end))
 
-    def __iter__(self):  # type: ignore[no-untyped-def]
+    def __iter__(self) -> Iterator[tuple[int, int]]:
         return iter(self._items)
 
 

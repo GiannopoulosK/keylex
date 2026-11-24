@@ -68,14 +68,14 @@ def test_b7_terms_with_symbols():
 
 def test_b8_remove_by_name():
     kl = KeywordList(["finance"])
-    kl.remove_keyword(Keyword("finance", synonyms=["money"]))
+    kl.remove(Keyword("finance", synonyms=["money"]))
     assert len(kl) == 0
 
 
 def test_b9_names_are_read_only_and_rename_is_consistent():
     kl = KeywordList(["old"])
     with pytest.raises(AttributeError):
-        kl[0].keyword = "new"
+        kl[0].name = "new"  # type: ignore[misc]
     kl.rename("old", "new")
     assert "old" not in kl and "new" in kl
     kl.add("new")
@@ -157,16 +157,7 @@ def test_b20_whitespace_and_hyphen_variation():
     assert len(m.find("New  York, New\nYork and New-York")) == 3
 
 
-def test_legacy_api_still_works():
-    from keylex.matchers import KeywordMatcher as LegacyMatcher
-    from keylex.matchers.keyword import Keyword as LegacyKeyword
-    from keylex.matchers.keyword_list import KeywordList as LegacyList
-
-    kl = LegacyList.from_list(["python", LegacyKeyword("rust")])
-    kl.add_keyword(LegacyKeyword("go"))
-    with pytest.warns(DeprecationWarning):
-        m = LegacyMatcher(kl, "fuzzy", 80, "partial_ratio")
-    assert m.match("python and rust", "keywords") == ["python", "rust"]
+def test_from_dict_shorthand():
     assert KeywordList.from_dict({"AI": ["machine intelligence", {"acronyms": ["AI"]}]})["AI"].synonyms == [
         "machine intelligence"
     ]

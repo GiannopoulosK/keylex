@@ -25,10 +25,7 @@ def test_basic_access(kl: KeywordList):
     assert kl.get("missing") is None
     with pytest.raises(KeyError):
         kl["missing"]
-    assert kl.get_index("python") == 2 and kl.get_index("nope") is None
-    with pytest.raises(ValueError):
-        kl.get_index("nope", raise_error=True)
-    assert kl.get_keywords_and_related_terms()["bank"] == ["lender"]
+    assert kl["bank"].related_terms == ["lender"]
     assert [k.name for k in kl.find_term("ai")] == ["artificial intelligence"]
 
 

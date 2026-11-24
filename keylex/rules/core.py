@@ -39,9 +39,13 @@ from abc import ABC, abstractmethod
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from ..match import Match
 from ..text import paragraph_spans, sentence_spans, word_tokens
+
+if TYPE_CHECKING:
+    from ..matchers.base import BaseMatcher
 
 __all__ = [
     "AllOf",
@@ -332,9 +336,9 @@ class Rule(ABC):
         """Short label used for nested nodes in :meth:`RuleResult.explain`."""
         return _truncate(self._key())
 
-    def test(self, text: str, matcher: object) -> RuleResult:
+    def test(self, text: str, matcher: BaseMatcher) -> RuleResult:
         """Convenience: run ``matcher.find(text)`` and evaluate this rule."""
-        return Document(text, matcher.find(text)).evaluate(self)  # type: ignore[attr-defined]
+        return Document(text, matcher.find(text)).evaluate(self)
 
     def at_least(self, n: int) -> AtLeast:
         """This rule occurring at least ``n`` times: ``kw("bank").at_least(3)``."""

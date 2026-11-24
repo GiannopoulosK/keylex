@@ -6,6 +6,40 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-24
+
+The first stable release. The public API is now covered by Semantic Versioning: no breaking
+changes until 2.0. This release removes the compatibility layer kept for the 0.0.2 API.
+
+### Removed
+The 0.0.2 compatibility aliases. Each one has a direct replacement:
+
+| Removed | Use instead |
+| --- | --- |
+| `keylex.matchers.keyword`, `keylex.matchers.keyword_list` modules | `from keylex import Keyword, Term, KeywordList` |
+| `keylex.matchers.Matcher` | `keylex.BaseMatcher` |
+| `KeywordMatcher(..., fuzzy_algo=...)` and `matcher.fuzzy_algo` | `scorer=` / `matcher.scorer` |
+| `Keyword.keyword` | `Keyword.name` |
+| `KeywordList.add_keyword(kw)` | `KeywordList.add(kw)` |
+| `KeywordList.remove_keyword(kw)` | `KeywordList.discard(kw)` (or `remove`, which raises if missing) |
+| `KeywordList.get_keyword(name)` | `KeywordList.get(name)` |
+| `KeywordList.get_all_keywords()` | `KeywordList.names` |
+| `KeywordList.get_index(name)` | `KeywordList.names.index(name)` |
+| `KeywordList.get_keywords_and_related_terms()` | `{kw.name: kw.related_terms for kw in keyword_list}` |
+
+### Changed
+- `Keyword.has_related_terms` is a property, like `has_synonyms` and `has_acronyms` (drop the `()`).
+- `threshold` is now the last positional argument of `KeywordMatcher`; every later option is
+  keyword-only.
+- Every public method, property and rule helper has a docstring, so editors show help on hover
+  and the API reference documents every member.
+- `Rule.test()` is typed to take a matcher (`BaseMatcher`).
+
+### Fixed
+- Loading a keyword file with invalid JSON (including JSON inside a CSV field) raised an unrelated
+  `TypeError`, and invalid YAML raised a bare `yaml.YAMLError`. Both now raise `ValueError` naming
+  the file.
+
 ## [0.1.0] - 2026-11-20
 
 A rewrite of the matching core plus four new subsystems: rules, keyword extraction, spaCy
@@ -80,5 +114,6 @@ CI on Linux, macOS and Windows with Python 3.10-3.14.
 ## [0.0.2]
 - Initial `Keyword`, `KeywordList` and `KeywordMatcher`.
 
+[1.0.0]: https://github.com/GiannopoulosK/keylex/releases/tag/v1.0.0
 [0.1.0]: https://github.com/GiannopoulosK/keylex/releases/tag/v0.1.0
 [0.0.2]: https://pypi.org/project/keylex/0.0.2/
